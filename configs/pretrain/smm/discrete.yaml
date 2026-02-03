@@ -1,0 +1,14 @@
+# @package _global_
+
+defaults:
+  - override /agent: smm_discrete
+  - override /configs/env: two_rooms7_0
+  - override /configs/obs: discrete
+
+num_train_frames: 500000
+eval_every_frames: 20000
+use_wandb: true
+save_video: false
+wandb_tag: smm_discrete
+agent:
+  feature_dim: 200

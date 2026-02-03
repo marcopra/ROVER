@@ -1,0 +1,3 @@
+obs_type: pixels
+env:
+  render_mode: rgb_array

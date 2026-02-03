@@ -1,0 +1,13 @@
+# @package _global_
+
+defaults:
+  - override /agent: rnd_discrete
+  - override /configs/env: two_rooms7_0
+  - override /configs/obs: pixels
+
+num_train_frames: 500000
+eval_every_frames: 20000
+use_wandb: true
+wandb_tag: rnd_discrete
+agent:
+  feature_dim: 200

@@ -1,0 +1,25 @@
+# @package _global_
+
+defaults:
+  - override /agent: dist_matching_embedding_augmented
+  - override /configs/env: multiplerooms5_4x4_0
+  - override /configs/obs: discrete
+
+num_train_frames: 50000
+num_seed_frames: 2000
+save_video: false
+use_wandb: false
+
+agent:
+  data_type: all
+  update_actor_every_steps: 5000
+  window_size: 10
+  unique_window: false
+  n_subsamples: 5000
+  subsampling_strategy: eder
+  epsilon_schedule: 0.3
+  sink_schedule: linear(0.0,0.004,50000)
+  T_init_steps: 2000
+  feature_dim: 200
+  lr_actor: 500
+  pmd_steps: 200
