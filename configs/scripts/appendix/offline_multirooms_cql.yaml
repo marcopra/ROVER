@@ -1,0 +1,56 @@
+# @package _global_
+# Appendix F.7 / Table 2.
+# Fixed replay-buffer transfer in Multi-Rooms with CQL.
+defaults:
+  - /agent: cql
+  - /env: gridworld/multiplerooms5_4x4_0
+  - _self_
+
+expl_agent: rover
+reward_free: false
+domain: gym
+task_name: ${env.name}
+obs_type: discrete_states
+frame_stack: 1
+action_repeat: 1
+discount: 0.99
+resolution: 84
+grayscale: false
+random_init: true
+random_goal: true
+update_actor_after_critic_steps: 0
+
+num_grad_steps: 15_000
+log_every_steps: 5_000
+eval_every_steps: 250
+eval_every_frames: 5_000
+num_eval_episodes: 5
+num_eval_dp_episodes: 10
+
+replay_buffer_dir: ../../../datasets
+replay_buffer_size: 1_000_000
+replay_buffer_num_workers: 4
+batch_size: ${agent.batch_size}
+nstep: ${agent.nstep}
+relable: true
+update_encoder: false
+
+seed: 1
+device: cuda
+save_video: false
+save_train_video: false
+use_tb: true
+use_wandb: false
+wandb_id: null
+wandb_project: rover_neurips_offline
+wandb_entity: urlb
+wandb_tag: appendix_offline_multirooms_cql
+wandb_run_name: ${now:%Y.%m.%d}_${now:%H%M}_${agent.name}_${task_name}_seed${seed}
+experiment: appendix_offline_multirooms_cql
+
+hydra:
+  run:
+    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S_%f}_${experiment}_${agent.name}_${expl_agent}_seed${seed}
+  sweep:
+    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${experiment}_${agent.name}_${expl_agent}
+    subdir: ${hydra.job.num}

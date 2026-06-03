@@ -1,0 +1,13 @@
+# @package _global_
+# Preserved appendix Multi-Rooms variant used for scaling/ablation runs.
+env:
+  name: MultipleRooms-v0
+  num_rooms: 3
+  room_size: 5
+  corridor_height: 1
+  connector_length: 1
+  max_steps: 80
+  render_mode: rgb_array
+  show_coordinates: false
+  goal_position: [8, 3]
+  start_position: [0, 0]

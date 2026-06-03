@@ -21,6 +21,9 @@ from logger import Logger
 from replay_buffer import ReplayBufferStorage, make_replay_loader
 from video import TrainVideoRecorder, VideoRecorder
 import matplotlib.pyplot as plt
+import seaborn as sns
+import ale_py
+from omegaconf import open_dict
 
 torch.backends.cudnn.benchmark = True
 
@@ -85,19 +88,51 @@ class Workspace:
 
 
         # create envs
-        task = cfg.task_name
-        if hasattr(cfg, 'env'):
-            env_kwargs = gym_env.make_kwargs(cfg)
-        else:
-            env_kwargs = {}
-        self.train_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
-                                self.cfg.action_repeat, self.cfg.seed, self.cfg.resolution, self.cfg.random_init, self.cfg.random_goal, url=False, **env_kwargs)
-        self.collection_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
-                                self.cfg.action_repeat, self.cfg.seed, self.cfg.resolution, self.cfg.random_init, self.cfg.random_goal, url=True, **env_kwargs)
-        
-        self.eval_env = gym_env.make(self.cfg.task_name, self.cfg.obs_type, self.cfg.frame_stack,
-                                self.cfg.action_repeat, self.cfg.seed, self.cfg.resolution, self.cfg.random_init, self.cfg.random_goal, url=False, **env_kwargs)
+        env_kwargs = OmegaConf.to_container(cfg.env, resolve=True) if hasattr(cfg, 'env') else {}
+        env_kwargs.pop('name', None)
+
+        self.train_env = gym_env.make(
+            self.cfg.task_name,
+            self.cfg.obs_type,
+            frame_stack=self.cfg.frame_stack,
+            action_repeat=self.cfg.action_repeat,
+            seed=self.cfg.seed,
+            resolution=self.cfg.resolution,
+            grayscale=self.cfg.grayscale,
+            url=False,
+            **env_kwargs,
+        )
+
+        self.collection_env = gym_env.make(
+            self.cfg.task_name,
+            self.cfg.obs_type,
+            frame_stack=self.cfg.frame_stack,
+            action_repeat=self.cfg.action_repeat,
+            seed=self.cfg.seed,
+            resolution=self.cfg.resolution,
+            grayscale=self.cfg.grayscale,
+            url=True,
+            **env_kwargs,
+        )
+
+        self.eval_env = gym_env.make(
+            self.cfg.task_name,
+            self.cfg.obs_type,
+            frame_stack=self.cfg.frame_stack,
+            action_repeat=self.cfg.action_repeat,
+            seed=self.cfg.seed,
+            resolution=self.cfg.resolution,
+            grayscale=self.cfg.grayscale,
+            url=False,
+            **env_kwargs,
+        )
        
+        # TODO: modify the make function to work with cfg and modify inplace the cfg values, this is a temporary solution to avoid modifying the make function
+        if isinstance(self.train_env.unwrapped, ale_py.env.AtariEnv) or str(self.cfg.task_name).startswith("ALE/"):
+            # L'action repeat è gestito internamente da ALE, quindi forziamo action_repeat a 1
+            with open_dict(self.cfg):
+                self.cfg.action_repeat = 1
+
         # Get observation and action specs for the agent
         obs_spec = gym_env.observation_spec(self.collection_env)
         action_spec = gym_env.action_spec(self.collection_env)
@@ -124,7 +159,7 @@ class Workspace:
             self.agent.init_from(pretrained_agent)
             # Re-insert environment after loading
             if hasattr(self.agent, 'insert_env'):
-                self.agent.insert_env(self.train_env)
+                self.agent.insert_env(self.eval_env)
         
         if cfg.p_path is not None and cfg.p_path != "none":
             if cfg.p_path.endswith(".npy"):
@@ -134,7 +169,7 @@ class Workspace:
                 self.agent.init_from(pretrained_agent)
                 # Re-insert environment after loading
                 if hasattr(self.agent, 'insert_env'):
-                    self.agent.insert_env(self.train_env)
+                    self.agent.insert_env(self.eval_env)
 
         # get meta specs
         meta_specs = self.agent.get_meta_specs()
@@ -188,6 +223,9 @@ class Workspace:
             self._replay_iter = iter(self.replay_loader)
         return self._replay_iter
 
+    def _should_update_agent(self, active_env):
+        return active_env is self.train_env
+
     def eval(self):
         step, episode, total_reward = 0, 0, 0
         eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
@@ -219,16 +257,12 @@ class Workspace:
         # predicates
         train_until_step = utils.Until(self.cfg.num_train_frames,
                                        self.cfg.action_repeat)
-        seed_until_step = utils.Until(self.cfg.num_seed_frames,
-                                      self.cfg.action_repeat)
         eval_every_step = utils.Every(self.cfg.eval_every_frames,
                                       self.cfg.action_repeat)
 
         episode_step, episode_reward = 0, 0
-        if not seed_until_step(self.global_step):
-            time_step = self.train_env.reset()
-        else:
-            time_step = self.collection_env.reset()
+        active_env = self.collection_env if self.global_frame < self.cfg.num_seed_frames else self.train_env
+        time_step = active_env.reset()
         meta = self.agent.init_meta()
         self.replay_storage.add(time_step, meta)
         self.train_video_recorder.init(time_step.image_observation)
@@ -253,10 +287,9 @@ class Workspace:
                     log('step', self.global_step)
 
                 # reset env
-                if not seed_until_step(self.global_step):
-                    time_step = self.train_env.reset()
-                else:
-                    time_step = self.collection_env.reset()
+                if active_env is self.collection_env and self.global_frame >= self.cfg.num_seed_frames:
+                    active_env = self.train_env
+                time_step = active_env.reset()
                 meta = self.agent.init_meta()
                 self.replay_storage.add(time_step, meta)
                 self.train_video_recorder.init(time_step.image_observation)
@@ -293,16 +326,13 @@ class Workspace:
                         self.visualize_dataset_heatmap("dataset_heatmap.png")
                         self.INITIAL_HEATMAP = True
             # try to update the agent
-            if not seed_until_step(self.global_step):
+            if self._should_update_agent(active_env):
                 for _ in range(self.cfg.num_agent_updates_per_env_step):
                     metrics = self.agent.update(self.replay_iter, self.global_step)
                     self.logger.log_metrics(metrics, self.global_frame, ty='train')
 
             # take env step
-            if not seed_until_step(self.global_step):
-                time_step = self.train_env.step(action)
-            else:
-                time_step = self.collection_env.step(action)
+            time_step = active_env.step(action)
             episode_reward += time_step.reward
             self.replay_storage.add(time_step, meta)
             if not self.INITIAL_HEATMAP:
@@ -320,6 +350,8 @@ class Workspace:
         Args:
             save_path: Path to save the heatmap
         """
+        sns.set_theme(style="white", context="paper")
+
         # Check if environment has cells attribute (grid-based environment)
         if hasattr(self.train_env.unwrapped, 'cells'):
             # Get grid dimensions
@@ -340,22 +372,32 @@ class Workspace:
             for s_idx in range(self.train_env.unwrapped.n_states):
                 x, y = self.train_env.unwrapped.idx_to_state[s_idx]
                 grid[y - min_y, x - min_x] = state_counts[s_idx]
-            
-            # Mask zero values to show background color
-            masked_grid = np.ma.masked_where(grid == 0, grid)
-            
-            fig, ax = plt.subplots(figsize=(8, 6))
-            # Set light gray background
-            ax.set_facecolor("#B2B2B2")
-            # Plot only non-zero values
-            im = ax.imshow(masked_grid, cmap='YlOrRd', interpolation='nearest')
-            ax.set_title(f'Dataset State Visitation (n={len(self.dataset["states"])})')
-            ax.set_xlabel('x')
-            ax.set_ylabel('y')
-            ax.set_xticks(np.arange(-0.5, grid_width, 1), minor=True)
-            ax.set_yticks(np.arange(-0.5, grid_height, 1), minor=True)
-            ax.grid(which='minor', color='white', linestyle='-', linewidth=0.5, alpha=0.5)
-            plt.colorbar(im, ax=ax, label='Visit Count')
+
+            # Mask zero values to emphasize visited regions
+            mask = grid == 0
+
+            fig, ax = plt.subplots(figsize=(8, 6), constrained_layout=True)
+            sns.heatmap(
+                grid,
+                mask=mask,
+                cmap='Blues',
+                linewidths=0.4,
+                linecolor='white',
+                cbar_kws={'label': 'Visit count', 'shrink': 0.85},
+                square=True,
+                ax=ax
+            )
+
+            # Put cell coordinates on ticks
+            ax.set_xticks(np.arange(grid_width) + 0.5)
+            ax.set_yticks(np.arange(grid_height) + 0.5)
+            ax.set_xticklabels(np.arange(min_x, max_x + 1), rotation=0)
+            ax.set_yticklabels(np.arange(min_y, max_y + 1), rotation=0)
+
+            ax.set_title(f'State visitation heatmap (n={len(self.dataset["states"])})')
+            ax.set_xlabel('x coordinate')
+            ax.set_ylabel('y coordinate')
+            sns.despine(ax=ax, left=False, bottom=False)
         else:
             # Continuous space: plot (x,y) coordinates as scatter plot
             states = self.dataset['states']
@@ -366,17 +408,34 @@ class Workspace:
             states = np.array(states).reshape(-1, 2)
             x_coords = states[:, 0]
             y_coords = states[:, 1]
-            
-            fig, ax = plt.subplots(figsize=(8, 6))
-            # Create scatter plot
-            ax.scatter(x_coords, y_coords, c='red', alpha=0.5, s=10)
-            ax.set_title(f'Dataset State Visitation (n={len(states)})')
-            ax.set_xlabel('x')
-            ax.set_ylabel('y')
-            ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+
+            fig, ax = plt.subplots(figsize=(8, 6), constrained_layout=True)
+            sns.kdeplot(
+                x=x_coords,
+                y=y_coords,
+                fill=True,
+                levels=30,
+                thresh=0.03,
+                cmap='Blues',
+                alpha=0.9,
+                ax=ax
+            )
+            sns.scatterplot(
+                x=x_coords,
+                y=y_coords,
+                s=8,
+                color='black',
+                alpha=0.25,
+                linewidth=0,
+                ax=ax
+            )
+            ax.set_title(f'State visitation density (n={len(states)})')
+            ax.set_xlabel('x coordinate')
+            ax.set_ylabel('y coordinate')
+            ax.grid(alpha=0.15, linestyle='--')
+            sns.despine(ax=ax)
+
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close(fig)
 
     def load_snapshot(self):
@@ -417,8 +476,7 @@ class Workspace:
             print(f"Loaded snapshot keys: {list(payload.keys())}")
         return payload
 
-
-@hydra.main(config_path='.', config_name='train')
+@hydra.main(config_path='configs', config_name='train/train_atari', version_base='1.1')
 def main(cfg):
     from train import Workspace as W
     root_dir = Path.cwd()

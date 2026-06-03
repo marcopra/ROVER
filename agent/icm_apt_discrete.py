@@ -55,7 +55,7 @@ class ICM(nn.Module):
 
 class ICMAPTAgent(DDPGAgent):
     def __init__(self, icm_scale, knn_rms, knn_k, knn_avg, knn_clip,
-                 update_encoder, icm_rep_dim, **kwargs):
+                 update_encoder, icm_rep_dim, icm_lr, **kwargs):
         super().__init__(**kwargs)
 
         self.icm_scale = icm_scale
@@ -65,7 +65,7 @@ class ICMAPTAgent(DDPGAgent):
                        icm_rep_dim).to(self.device)
 
         # optimizers
-        self.icm_opt = torch.optim.Adam(self.icm.parameters(), lr=self.lr)
+        self.icm_opt = torch.optim.Adam(self.icm.parameters(), lr=icm_lr)
 
         self.icm.train()
 
@@ -127,7 +127,8 @@ class ICMAPTAgent(DDPGAgent):
 
         if self.use_tb or self.use_wandb:
             metrics['extr_reward'] = extr_reward.mean().item()
-            metrics['intr_reward'] = intr_reward.mean().item()
+            if self.reward_free:
+                metrics['intr_reward'] = intr_reward.mean().item()
             metrics['batch_reward'] = reward.mean().item()
 
         if not self.update_encoder:
@@ -139,8 +140,9 @@ class ICMAPTAgent(DDPGAgent):
             self.update_critic(obs.detach(), action, reward, discount,
                                next_obs.detach(), step))
 
-        # update actor
-        metrics.update(self.update_actor(obs.detach(), step))
+        if step >= self.update_actor_after_critic_steps:
+            # update actor
+            metrics.update(self.update_actor(obs.detach(), step))
 
         # update critic target
         utils.soft_update_params(self.critic, self.critic_target,

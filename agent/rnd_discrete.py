@@ -8,6 +8,12 @@ import torch.nn.functional as F
 
 import utils
 from agent.ddpg_discrete import DDPGAgent
+from agent.utils_debug_visualization import (
+    FetchCoverageVisualizer,
+    PointMazeCoverageVisualizer,
+    _is_fetch_env,
+    _is_point_maze_env,
+)
 
 
 class RND(nn.Module):
@@ -56,10 +62,23 @@ class RND(nn.Module):
 
 
 class RNDAgent(DDPGAgent):
-    def __init__(self, rnd_rep_dim, update_encoder, rnd_lr, rnd_scale=1., **kwargs):
+    def __init__(self,
+                 rnd_rep_dim,
+                 update_encoder,
+                 rnd_lr,
+                 rnd_scale=1.,
+                 non_episodic_intrinsic_returns=False,
+                 debug_plot_every_steps=10000,
+                 **kwargs):
         super().__init__(**kwargs)
         self.rnd_scale = rnd_scale
         self.update_encoder = update_encoder
+        self.non_episodic_intrinsic_returns = non_episodic_intrinsic_returns
+        self.debug_plot_every_steps = int(debug_plot_every_steps) if debug_plot_every_steps else 0
+        self.n_actions = self.action_dim
+        self.wrapped_env = None
+        self.domain_visualizer = None
+        self._last_domain_debug_plot_step = None
 
         self.rnd = RND(self.obs_dim, self.hidden_dim, rnd_rep_dim,
                        self.encoder, self.aug, self.obs_shape,
@@ -70,6 +89,61 @@ class RNDAgent(DDPGAgent):
         self.rnd_opt = torch.optim.Adam(self.rnd.parameters(), lr=rnd_lr)
 
         self.rnd.train()
+
+    def insert_env(self, env):
+        """Attach optional domain-specific coverage plots to the eval env."""
+        self.wrapped_env = env
+        self.domain_visualizer = None
+
+        try:
+            if _is_fetch_env(env):
+                self.domain_visualizer = FetchCoverageVisualizer(
+                    self,
+                    env,
+                    rollout_steps=500,
+                    bins=10,
+                )
+            elif _is_point_maze_env(env):
+                self.domain_visualizer = PointMazeCoverageVisualizer(
+                    self,
+                    env,
+                    rollout_steps=10000,
+                    bins=20,
+                )
+
+            if self.domain_visualizer is not None:
+                print("✓ RND domain coverage visualizer initialized")
+        except Exception as exc:
+            print(f"⚠ Could not initialize RND domain coverage visualizer: {exc}")
+            self.domain_visualizer = None
+
+    def compute_action_probs(self, obs: np.ndarray) -> np.ndarray:
+        """Compute the current discrete policy probabilities for debug rollouts."""
+        with torch.no_grad():
+            obs = torch.as_tensor(obs, device=self.device).float().unsqueeze(0)
+            enc_obs = self.encoder(obs)
+            probs = self.actor(enc_obs)
+            probs = probs.detach().cpu().numpy().reshape(-1)
+
+        probs = np.clip(probs, 0.0, None)
+        total = probs.sum()
+        if not np.isfinite(total) or total <= 0.0:
+            return np.ones(self.action_dim, dtype=np.float64) / self.action_dim
+        return probs / total
+
+    def _maybe_save_domain_debug_plot(self, step):
+        if self.domain_visualizer is None or self.debug_plot_every_steps <= 0:
+            return
+        if step <= 0 or step % self.debug_plot_every_steps != 0:
+            return
+        if self._last_domain_debug_plot_step == step:
+            return
+
+        try:
+            self.domain_visualizer.save(step)
+            self._last_domain_debug_plot_step = step
+        except Exception as exc:
+            print(f"⚠ Could not generate RND domain coverage plot at step {step}: {exc}")
 
     def update_rnd(self, obs, step):
         metrics = dict()
@@ -119,8 +193,11 @@ class RNDAgent(DDPGAgent):
             if self.use_tb or self.use_wandb:
                 metrics['intr_reward'] = intr_reward.mean().item()
             reward = intr_reward
+            critic_discount = (torch.ones_like(discount) if self.non_episodic_intrinsic_returns
+                               else discount)
         else:
             reward = extr_reward
+            critic_discount = discount
 
         # augment and encode
         obs = self.aug_and_encode(obs)
@@ -140,14 +217,17 @@ class RNDAgent(DDPGAgent):
 
         # update critic
         metrics.update(
-            self.update_critic(obs.detach(), action, reward, discount,
+            self.update_critic(obs.detach(), action, reward, critic_discount,
                                next_obs.detach(), step))
 
-        # update actor
-        metrics.update(self.update_actor(obs.detach(), step))
+        if step >= self.update_actor_after_critic_steps:
+            # update actor
+            metrics.update(self.update_actor(obs.detach(), step))
 
         # update critic target
         utils.soft_update_params(self.critic, self.critic_target,
                                  self.critic_target_tau)
+
+        self._maybe_save_domain_debug_plot(step)
 
         return metrics

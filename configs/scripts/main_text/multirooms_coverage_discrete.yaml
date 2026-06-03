@@ -1,0 +1,56 @@
+# @package _global_
+# Paper Sec. 4.2 / Fig. 3.
+# Full-coverage sample-efficiency in Multi-Rooms with one-hot observations.
+# Override `agent` to run baselines: rnd_discrete, smm_discrete,
+# icm_apt_discrete, maxent_discrete, cic_discrete.
+defaults:
+  - /agent: rover_paper
+  - /env: gridworld/multiplerooms5_4x4_0
+  - _self_
+
+reward_free: true
+domain: gym
+task_name: ${env.name}
+obs_type: discrete_states
+frame_stack: 1
+action_repeat: 1
+discount: 0.99
+resolution: 84
+grayscale: false
+random_init: true
+random_goal: true
+update_actor_after_critic_steps: 0
+
+num_train_frames: 100_000
+num_seed_frames: 2_000
+eval_every_frames: 5_000
+num_eval_episodes: 20
+snapshots: [100_000]
+snapshot_dir: models/${obs_type}/${domain}/${agent.name}/${seed}
+
+replay_buffer_size: 1_000_000
+replay_buffer_num_workers: 1
+batch_size: ${agent.batch_size}
+nstep: ${agent.nstep}
+update_encoder: true
+save_buffer: true
+
+seed: 1
+device: cuda
+save_video: false
+save_train_video: false
+use_tb: true
+use_wandb: false
+wandb_project: rover_neurips_pretrain
+wandb_entity: urlb
+wandb_tag: main_text_multirooms_discrete
+wandb_run_name: ${now:%Y.%m.%d}_${now:%H%M}_${agent.name}_${task_name}_discrete_seed${seed}
+wandb_id: none
+experiment: main_text_multirooms_coverage_discrete
+
+hydra:
+  run:
+    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S_%f}_${experiment}_${agent.name}_seed${seed}
+  sweep:
+    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${experiment}_${agent.name}
+    subdir: ${hydra.job.num}

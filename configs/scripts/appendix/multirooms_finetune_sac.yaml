@@ -1,0 +1,65 @@
+# @package _global_
+# Appendix F.4 / Fig. 9.
+# Online SAC finetuning in Multi-Rooms. Pass `p_path` to initialize from a
+# pretrained checkpoint, or leave `p_path=none` for scratch.
+defaults:
+  - /agent: sac_discrete
+  - /env: gridworld/multiplerooms5_4x4_0
+  - _self_
+
+reward_free: false
+domain: gym
+task_name: ${env.name}
+obs_type: pixels
+frame_stack: 1
+action_repeat: 1
+discount: 0.99
+resolution: 84
+grayscale: false
+random_init: true
+random_goal: true
+
+num_train_frames: 60_000
+num_seed_frames: 2_000
+update_actor_after_critic_steps: 7_999
+num_agent_updates_per_env_step: 1
+eval_every_frames: 5_000
+num_eval_episodes: 10
+
+snapshot_ts: 0
+snapshot_base_dir: ./pretrained_models
+p_path: none
+
+replay_buffer_size: 1_000_000
+replay_buffer_num_workers: 1
+batch_size: ${agent.batch_size}
+nstep: ${agent.nstep}
+update_encoder: false
+
+seed: 1
+device: cuda
+save_video: false
+save_train_video: false
+use_tb: true
+use_wandb: false
+wandb_id: null
+wandb_project: rover_neurips_appendix
+wandb_entity: urlb
+wandb_tag: appendix_multirooms_finetune_sac
+wandb_run_name: ${now:%Y.%m.%d}_${now:%H%M}_${agent.name}_${task_name}_seed${seed}
+wandb_mode: online
+experiment: appendix_multirooms_finetune_sac
+
+agent:
+  actor_lr: 1e-5
+  critic_lr: 1e-5
+  alpha_lr: 1e-5
+  feature_dim: 200
+  batch_size: 256
+
+hydra:
+  run:
+    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S_%f}_${experiment}_${agent.name}_${env.goal_position}_seed${seed}_${get_filename:${p_path}}
+  sweep:
+    dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M}_${experiment}_${agent.name}_${env.goal_position}
+    subdir: ${hydra.job.num}

@@ -1,0 +1,13 @@
+# @package _global_
+# Preserved appendix Multi-Rooms variant from the older experiment configs.
+env:
+  name: MultipleRooms-v0
+  num_rooms: 10
+  room_size: 3
+  corridor_height: 1
+  connector_length: 1
+  max_steps: 500
+  render_mode: rgb_array
+  show_coordinates: false
+  goal_position: [25, 4]
+  start_position: [0, 0]

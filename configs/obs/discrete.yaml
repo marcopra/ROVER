@@ -1,3 +1,0 @@
-obs_type: discrete_states
-env:
-  render_mode: null

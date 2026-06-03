@@ -19,6 +19,7 @@ class Encoder(nn.Module):
         self.temperature = 0.05
 
         # self.fc = nn.Identity()
+        # self.repr_dim = obs_shape[0] # TODO activate this for encoder identity 
         # self.fc = nn.Linear(obs_shape[0], feature_dim, bias=False)
         self.fc =  nn.Sequential(
             nn.Linear(obs_shape[0], hidden_dim, bias=False),
@@ -43,41 +44,41 @@ class Encoder(nn.Module):
         h = self.forward(obs)
         return h
 
+from agent.rover import CNNEncoder
+# class CNNEncoder(nn.Module):
+#     def __init__(self, obs_shape, feature_dim):
+#         super().__init__()
 
-class CNNEncoder(nn.Module):
-    def __init__(self, obs_shape, feature_dim):
-        super().__init__()
+#         assert len(obs_shape) == 3
 
-        assert len(obs_shape) == 3
+#         self.conv = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
+#                                   nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+#                                   nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+#                                   nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+#                                   nn.ReLU())
 
-        self.conv = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
-                                  nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                  nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                  nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                  nn.ReLU())
+#         self.repr_dim = 32 * 35 * 35
 
-        self.repr_dim = 32 * 35 * 35
+#         self.projector = nn.Sequential(
+#             nn.Linear(self.repr_dim, feature_dim),
+#             # nn.LayerNorm(feature_dim),
+#             nn.ReLU()
+#         )
 
-        self.projector = nn.Sequential(
-            nn.Linear(self.repr_dim, feature_dim),
-            # nn.LayerNorm(feature_dim),
-            nn.ReLU()
-        )
+#         self.apply(utils.weight_init)
 
-        self.apply(utils.weight_init)
+#     def forward(self, obs):
+#         obs = obs / 255.
+#         h = self.conv(obs)
+#         h = h.view(h.shape[0], -1)
+#         # h = F.softmax(h/0.1, dim=-1)
+#         return h
 
-    def forward(self, obs):
-        obs = obs / 255.
-        h = self.conv(obs)
-        h = h.view(h.shape[0], -1)
-        # h = F.softmax(h/0.1, dim=-1)
-        return h
-
-    def encode_and_project(self, obs):
-        h = self.forward(obs)
-        z = self.projector(h)
-        z =F.normalize(z, p=1, dim=-1)
-        return z
+#     def encode_and_project(self, obs):
+#         h = self.forward(obs)
+#         z = self.projector(h)
+#         z =F.normalize(z, p=1, dim=-1)
+#         return z
     
 class DDPGAgent:
     def __init__(self,
@@ -178,33 +179,64 @@ class DDPGAgent:
         
         # Caso 2: DistMatchingEmbeddingAgent
         elif type(other).__name__ == 'DistMatchingEmbeddingAgent':
-            # Carica encoder
             self.encoder.load_state_dict(other.encoder.state_dict())
             print("✓ Encoder loaded from DistMatchingEmbeddingAgent")
-            
-            # Inizializza kernel actor se disponibile
+
             if not hasattr(other, '_phi_all_obs'):
                 raise RuntimeError(
                     "DistMatchingEmbeddingAgent not fully trained. "
                     "Missing cached features (_phi_all_obs). "
                     "Make sure the agent completed at least one policy update."
                 )
-            
-            # Extract E matrix (action one-hot encoding)
-            # E shape: [num_unique, n_actions]
-            E = other.E  # This should be available from the cached features
-            
+
+            E = other.E
+
             self.actor.initialize_from_pretrained(
                 phi_dataset=other._phi_all_obs.to(self.device),
                 gradient_coeff=other.gradient_coeff.to(self.device),
                 eta=other.lr_actor,
-                E=E.to(self.device)  # Pass E matrix for proper initialization
+                E=E.to(self.device)
             )
-            print("✓ KernelActorDiscrete initialized from pretrained weights")
-            print(f"  Dataset size: {other.dataset.size}")
-            print(f"  Feature dim: {other.feature_dim}")
-            print(f"  Eta: {other.lr_actor}")
-            print(f"  E matrix shape: {E.shape}")
+            try:
+                print("✓ KernelActorDiscrete initialized from DistMatchingEmbeddingAgent weights")
+                print(f"  Dataset size: {other.dataset.size}")
+                print(f"  Feature dim: {other.feature_dim}")
+                print(f"  Eta: {other.lr_actor}")
+                print(f"  E matrix shape: {E.shape}")
+            except Exception as e:
+                print(f"✓ KernelActorDiscrete initialized, but failed to print details: {e}")
+
+        # Caso 3: RoverAgent
+        elif type(other).__name__ == 'RoverAgent':
+            if not hasattr(other, '_phi_all_obs'):
+                raise RuntimeError(
+                    "RoverAgent not fully trained. Missing cached features (_phi_all_obs). "
+                    "Make sure the agent completed at least one policy update."
+                )
+
+            source_encoder = other.policy_encoder if hasattr(other, 'policy_encoder') else other.encoder
+            self.encoder.load_state_dict(source_encoder.state_dict())
+            print("✓ Encoder loaded from RoverAgent policy encoder")
+
+            E = other.E
+
+            # Rover stores PMD step size inside gradient_coeff updates already, so the
+            # closed-form policy used for loading is softmax(-logits), i.e. eta = 1.
+            self.actor.initialize_from_pretrained(
+                phi_dataset=other._phi_all_obs.to(self.device),
+                gradient_coeff=other.gradient_coeff.to(self.device),
+                eta=1.0,
+                E=E.to(self.device)
+            )
+            try:
+                dataset_size = getattr(other, "batch_size_actor", other._phi_all_obs.shape[0])
+                print("✓ KernelActorDiscrete initialized from RoverAgent weights")
+                print(f"  Dataset size: {dataset_size}")
+                print(f"  Feature dim: {other.feature_dim}")
+                print("  Eta: 1.0 (rover logits already include PMD step size)")
+                print(f"  E matrix shape: {E.shape}")
+            except Exception as e:
+                print(f"✓ KernelActorDiscrete initialized, but failed to print details: {e}")
                   
         else:
             raise ValueError(
