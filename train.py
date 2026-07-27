@@ -3,6 +3,7 @@ import warnings
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 import os
+import json
 
 os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
 os.environ['MUJOCO_GL'] = 'egl'
@@ -204,6 +205,19 @@ class Workspace:
         self.timer = utils.Timer()
         self._global_step = 0
         self._global_episode = 0
+        self._matched_metrics_path = None
+        if getattr(cfg, "matched_metrics_path", "none") not in (None, "none"):
+            self._matched_metrics_path = Path(cfg.matched_metrics_path)
+            self._matched_metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        self._first_reward_frame = None
+        self._first_update_frame = None
+
+    def _record_matched_metric(self, event, **values):
+        if self._matched_metrics_path is None:
+            return
+        row = {"event": event, "frame": self.global_frame, **values}
+        with self._matched_metrics_path.open("a") as stream:
+            stream.write(json.dumps(row, sort_keys=True) + "\n")
 
     @property
     def global_step(self):
@@ -228,10 +242,12 @@ class Workspace:
 
     def eval(self):
         step, episode, total_reward = 0, 0, 0
+        episode_successes, episode_returns = [], []
         eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
         meta = self.agent.init_meta()
         while eval_until_episode(episode):
             time_step = self.eval_env.reset()
+            current_return, current_success = 0.0, False
             self.video_recorder.init(self.eval_env, enabled=(episode == 0))
             while not time_step.last():
                 with torch.no_grad(), utils.eval_mode(self.agent):
@@ -242,8 +258,12 @@ class Workspace:
                 time_step = self.eval_env.step(action)
                 self.video_recorder.record(self.eval_env)
                 total_reward += time_step.reward
+                current_return += float(time_step.reward)
+                current_success = current_success or bool(time_step.success)
                 step += 1
 
+            episode_successes.append(float(current_success))
+            episode_returns.append(current_return)
             episode += 1
             self.video_recorder.save(f'{self.global_frame}.mp4')
 
@@ -252,6 +272,12 @@ class Workspace:
             log('episode_length', step * self.cfg.action_repeat / episode)
             log('episode', self.global_episode)
             log('step', self.global_step)
+        self._record_matched_metric(
+            "evaluation",
+            success_rate=float(np.mean(episode_successes)),
+            mean_return=float(np.mean(episode_returns)),
+            episodes=episode,
+        )
 
     def train(self):
         # predicates
@@ -260,7 +286,7 @@ class Workspace:
         eval_every_step = utils.Every(self.cfg.eval_every_frames,
                                       self.cfg.action_repeat)
 
-        episode_step, episode_reward = 0, 0
+        episode_step, episode_reward, episode_success = 0, 0, False
         active_env = self.collection_env if self.global_frame < self.cfg.num_seed_frames else self.train_env
         time_step = active_env.reset()
         meta = self.agent.init_meta()
@@ -285,6 +311,17 @@ class Workspace:
                     log('episode', self.global_episode)
                     log('buffer_size', len(self.replay_storage))
                     log('step', self.global_step)
+                self._record_matched_metric(
+                    "episode",
+                    episode=self.global_episode,
+                    episode_return=float(episode_reward),
+                    success=bool(episode_success),
+                    episode_length=int(episode_frame),
+                    before_first_update=(
+                        self._first_update_frame is None
+                        or self.global_frame <= self._first_update_frame
+                    ),
+                )
 
                 # reset env
                 if active_env is self.collection_env and self.global_frame >= self.cfg.num_seed_frames:
@@ -296,6 +333,7 @@ class Workspace:
 
                 episode_step = 0
                 episode_reward = 0
+                episode_success = False
 
             # try to evaluate
             if eval_every_step(self.global_step):
@@ -327,6 +365,9 @@ class Workspace:
                         self.INITIAL_HEATMAP = True
             # try to update the agent
             if self._should_update_agent(active_env):
+                if self._first_update_frame is None:
+                    self._first_update_frame = self.global_frame
+                    self._record_matched_metric("first_parameter_update")
                 for _ in range(self.cfg.num_agent_updates_per_env_step):
                     metrics = self.agent.update(self.replay_iter, self.global_step)
                     self.logger.log_metrics(metrics, self.global_frame, ty='train')
@@ -334,6 +375,17 @@ class Workspace:
             # take env step
             time_step = active_env.step(action)
             episode_reward += time_step.reward
+            episode_success = episode_success or bool(time_step.success)
+            if bool(time_step.success) and self._first_reward_frame is None:
+                self._first_reward_frame = self.global_frame + self.cfg.action_repeat
+                self._record_matched_metric(
+                    "first_reward",
+                    interactions=int(self._first_reward_frame),
+                    before_first_update=(
+                        self._first_update_frame is None
+                        or self._first_reward_frame <= self._first_update_frame
+                    ),
+                )
             self.replay_storage.add(time_step, meta)
             if not self.INITIAL_HEATMAP:
                 self.dataset['states'] = np.append(self.dataset['states'],  time_step.proprio_observation if time_step.proprio_observation.shape[0] == 2 else  np.argmax(time_step.proprio_observation))

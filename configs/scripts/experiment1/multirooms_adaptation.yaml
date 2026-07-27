@@ -1,0 +1,54 @@
+# @package _global_
+defaults:
+  - /agent: ddpg_discrete_with_kernel_actor
+  - /env: gridworld/multiplerooms5_4x4_0
+  - _self_
+
+reward_free: false
+domain: gym
+task_name: ${env.name}
+obs_type: discrete_states
+frame_stack: 1
+action_repeat: 1
+discount: 0.99
+resolution: 84
+grayscale: false
+random_init: false
+random_goal: false
+num_train_frames: 60_000
+num_seed_frames: 2_000
+update_actor_after_critic_steps: 7_999
+num_agent_updates_per_env_step: 1
+eval_every_frames: 1_000
+num_eval_episodes: 50
+snapshot_ts: 0
+snapshot_base_dir: ./pretrained_models
+p_path: ???
+matched_metrics_path: none
+replay_buffer_size: 1_000_000
+replay_buffer_num_workers: 1
+batch_size: ${agent.batch_size}
+nstep: ${agent.nstep}
+update_encoder: false
+seed: 1
+device: cuda
+save_video: false
+save_train_video: false
+use_tb: true
+use_wandb: false
+wandb_id: null
+wandb_project: rover_experiment1
+wandb_entity: urlb
+wandb_tag: matched_occupancy
+wandb_run_name: experiment1
+wandb_mode: disabled
+experiment: matched_occupancy_adaptation
+agent:
+  actor_lr: 1e-7
+  critic_lr: 1e-4
+  dataset_dim: 4_096
+  feature_dim: 200
+hydra:
+  run:
+    dir: ./results/experiment1/manual
+

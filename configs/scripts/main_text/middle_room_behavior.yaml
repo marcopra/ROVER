@@ -14,7 +14,7 @@ task_name: ${env.name}
 obs_type: discrete_states
 frame_stack: 1
 action_repeat: 1
-discount: 0.9
+discount: 0.88
 resolution: 84
 grayscale: false
 random_init: true
