@@ -30,15 +30,15 @@ epsilon <= 0.1 at near-full support and epsilon=1e-3 at batch 1,024.
 ## Run
 
 ```bash
-conda run -n dist_matching python -m experiments.sink_state_ablation.launch \
+python -m experiments.sink_state_ablation.launch \
   --stage pretrain
 bash results/experiment3_sink_state/launch_pretrain.sh
 
-conda run -n dist_matching python -m experiments.sink_state_ablation.launch \
+python -m experiments.sink_state_ablation.launch \
   --stage adapt
 bash results/experiment3_sink_state/launch_adapt.sh
 
-conda run -n dist_matching python -m experiments.sink_state_ablation.analyze
+python -m experiments.sink_state_ablation.analyze
 ```
 
 Matrix: eight condition cells with one pretraining run each (`pretrain_seed=1`).

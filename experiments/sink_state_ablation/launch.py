@@ -29,6 +29,7 @@ def main():
                     "conda", "run", "-n", "dist_matching", "python", "pretrain.py",
                     "--config-name", "scripts/experiment3/sink_ablation_pretrain",
                     f"seed={seed}",
+                    "num_train_frames=50000",
                     f"agent.batch_size_actor={batch}",
                     f"agent.sink_schedule={sink['schedule']}",
                     f"ablation_run_dir={condition_dir.resolve()}",
