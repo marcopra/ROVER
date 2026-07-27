@@ -216,3 +216,5 @@ results
 tmp*
 data_plot/
 exp_*
+*.pdf
+*.docx

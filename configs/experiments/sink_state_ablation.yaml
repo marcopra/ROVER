@@ -1,0 +1,31 @@
+experiment: experiment3_sink_state
+output_dir: results/experiment3_sink_state
+paper_protocol:
+  environment: MultipleRooms-v0
+  observation: 84x84 RGB
+  train_frames: 50000
+  horizon: 300
+  discount: 0.99
+  replay_sampling:
+    encoder: uniform_episode_then_uniform_transition_with_replacement
+    operator: uniform_all_accumulated_transitions_without_replacement
+  encoder_batch_size: 1024
+  operator_batch_size: 5000
+  operator_update_every_frames: 1500
+  pmd_steps: 250
+  paper_sink_schedule: linear(0.0,0.004,50000)
+  refactor_sink_schedule: linear(0.0,0.05,50000)
+pretrain_seed: 1
+adaptation_seeds: [1, 2, 3]
+sinks:
+  - {label: no_sink, schedule: "0.0", operator_batches: [5000, 1024]}
+  - {label: fixed_1e-3, schedule: "0.001", operator_batches: [5000]}
+  - {label: fixed_1e-2, schedule: "0.01", operator_batches: [5000]}
+  - {label: fixed_1e-1, schedule: "0.1", operator_batches: [5000]}
+  - {label: paper_schedule, schedule: "linear(0.0,0.004,50000)", operator_batches: [5000, 1024]}
+  - {label: large_10, schedule: "10.0", operator_batches: [5000]}
+low_support_count_threshold: 2
+downstream:
+  goal_position: [21, 4]
+  success_threshold: 0.5
+  auc_horizon: 60000

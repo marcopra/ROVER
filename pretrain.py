@@ -9,6 +9,7 @@ os.environ['MUJOCO_GL'] = 'egl'
 
 from pathlib import Path
 import inspect
+import json
 
 import hydra
 from omegaconf import OmegaConf
@@ -163,6 +164,10 @@ class Workspace:
                                                 first_transition=first_transition)
         
         self._replay_iter = None
+        self._ablation_metrics_path = None
+        if getattr(cfg, "ablation_metrics_path", "none") not in (None, "none"):
+            self._ablation_metrics_path = Path(cfg.ablation_metrics_path)
+            self._ablation_metrics_path.parent.mkdir(parents=True, exist_ok=True)
 
         # create video recorders
         self.video_recorder = VideoRecorder(
@@ -219,6 +224,13 @@ class Workspace:
             self._replay_iter = iter(self.replay_loader)
         return self._replay_iter
 
+    def _record_ablation_metric(self, event, **values):
+        if self._ablation_metrics_path is None:
+            return
+        row = {"event": event, "frame": self.global_frame, **values}
+        with self._ablation_metrics_path.open("a") as stream:
+            stream.write(json.dumps(row, sort_keys=True) + "\n")
+
     def _should_use_synthetic_first_transition(self):
         env_cfg = getattr(self.cfg, "env", None)
         if env_cfg is not None and hasattr(env_cfg, "synthetic_first_transition"):
@@ -266,6 +278,33 @@ class Workspace:
             self.video_recorder.save(f'{self.global_frame}.mp4')
 
         self._save_eval_trajectory_plots(eval_trajectories)
+
+        if eval_trajectories:
+            visits = {}
+            for trajectory in eval_trajectories:
+                for point in trajectory:
+                    key = f"{int(point[0])},{int(point[1])}"
+                    visits[key] = visits.get(key, 0) + 1
+            total_visits = sum(visits.values())
+            distribution = {
+                key: count / total_visits for key, count in sorted(visits.items())
+            }
+            base_env = getattr(self.eval_env, "unwrapped", self.eval_env)
+            feasible_states = len(getattr(base_env, "cells", ())) or None
+            self._record_ablation_metric(
+                "coverage",
+                optimization_round=int(
+                    self.global_step // self.cfg.agent.update_actor_every_steps
+                ),
+                covered_states=len(visits),
+                feasible_states=feasible_states,
+                coverage_fraction=(
+                    len(visits) / feasible_states if feasible_states else None
+                ),
+                visits=visits,
+                visitation_distribution=distribution,
+                eval_episodes=episode,
+            )
 
         with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
             log('episode_reward', total_reward / episode)
@@ -408,6 +447,19 @@ class Workspace:
                 else:
                     metrics = self.agent.update(self.replay_iter, self.global_step)
                 self.logger.log_metrics(metrics, self.global_frame, ty='train')
+                if metrics and "estimated_sink_mass" in metrics:
+                    serializable = {
+                        key: float(value)
+                        for key, value in metrics.items()
+                        if isinstance(value, (int, float, np.integer, np.floating))
+                    }
+                    self._record_ablation_metric(
+                        "operator_update",
+                        optimization_round=int(
+                            self.global_step // self.cfg.agent.update_actor_every_steps
+                        ),
+                        **serializable,
+                    )
 
             # take env step
             time_step = self.train_env.step(action)
@@ -416,6 +468,9 @@ class Workspace:
             self.train_video_recorder.record(time_step.image_observation)
             episode_step += 1
             self._global_step += 1
+        if self._ablation_metrics_path is not None:
+            self.eval()
+        self.save_snapshot()
 
     def save_snapshot(self):
         snapshot_dir = self.work_dir / Path(self.cfg.snapshot_dir)

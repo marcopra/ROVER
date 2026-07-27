@@ -2205,6 +2205,33 @@ class RoverAgent:
                 sink_norm=sink_norm 
         )
         actor_loss = torch.linalg.norm(nu_pi)**2
+        # Sink occupies final learned feature coordinate; final augmented row is
+        # algebraic padding. Divide embedding coordinate by epsilon to recover mass.
+        sink_mass = (
+            float(torch.abs(nu_pi[-2]).item()) / float(sink_norm)
+            if float(sink_norm) > 0.0 else 0.0
+        )
+        with torch.no_grad():
+            flat_obs = obs.detach().reshape(obs.shape[0], -1).cpu().numpy()
+            flat_action = action.detach().reshape(action.shape[0], -1)
+            action_ids = (
+                flat_action[:, 0].long()
+                if flat_action.shape[1] == 1
+                else flat_action.argmax(dim=1)
+            ).cpu().numpy()
+            pair_counts = {}
+            state_keys = []
+            for state, action_id in zip(flat_obs, action_ids):
+                state_key = state.tobytes()
+                state_keys.append(state_key)
+                pair = (state_key, int(action_id))
+                pair_counts[pair] = pair_counts.get(pair, 0) + 1
+            low_support = np.asarray([
+                pair_counts.get((state_key, action_id), 0) < 2
+                for state_key in state_keys
+                for action_id in range(self.n_actions)
+            ], dtype=np.float32)
+            low_support_query_fraction = float(low_support.mean())
         print(f"Actor loss (squared norm of occupancy measure): {actor_loss}")
         best_loss = actor_loss
         best_pi = self.pi.clone()
@@ -2305,6 +2332,9 @@ class RoverAgent:
             metrics['actor_loss'] = actor_loss
             metrics['actor_eta'] = float(self.current_eta)
             metrics['actor_best_loss'] = float(best_loss)
+        metrics['sink_norm'] = float(sink_norm)
+        metrics['estimated_sink_mass'] = sink_mass
+        metrics['low_support_query_fraction'] = low_support_query_fraction
    
         return metrics
 
@@ -2619,7 +2649,7 @@ class RoverAgent:
         else:
             return self.encoder(obs)
 
-    def update(self, replay_iter, step):
+    def update(self, replay_iter, step, replay_buffer=None):
         metrics = dict()
 
         if step % self.update_every_steps != 0 and self._is_T_sufficiently_initialized(step) is True:
@@ -2642,26 +2672,31 @@ class RoverAgent:
         # In ideal mode, we can update actor immediately
         if  step % self.update_actor_every_steps == 0 or step == self.num_expl_steps + self.T_init_steps: # or self.ideal:  
 
-            num_batches_needed = self.batch_size_actor // self.batch_size
-            
-            obs_list = [obs]
-            action_list = [action]
-            next_obs_list = [next_obs]
-            reward_list = [reward]
-            for _ in range(num_batches_needed - 1):
-                batch = next(replay_iter)
-                obs_b, action_b, reward_b, _, next_obs_b = utils.to_torch(batch, self.device)
-                obs_list.append(obs_b)
-                action_list.append(action_b)
-                next_obs_list.append(next_obs_b)
-                reward_list.append(reward_b.reshape(-1, 1))  # Ensure reward has shape [B, 1]
-            
-
-            # Concatena tutti i batch
-            obs_actor = torch.cat(obs_list, dim=0)
-            action_actor = torch.cat(action_list, dim=0)
-            next_obs_actor = torch.cat(next_obs_list, dim=0)
-            reward_actor = torch.cat(reward_list, dim=0)
+            if replay_buffer is not None:
+                all_data = replay_buffer.get_all_data()
+                available = all_data[0].shape[0]
+                sample_count = min(self.batch_size_actor - 1, available)
+                indices = np.random.choice(available, size=sample_count, replace=False)
+                sampled = tuple(field[indices] for field in all_data)
+                first = replay_buffer.get_first_transition()
+                actor_batch = tuple(
+                    np.concatenate((first_field, sampled_field), axis=0)
+                    for first_field, sampled_field in zip(first, sampled)
+                )
+                obs_actor, action_actor, reward_actor, _, next_obs_actor = utils.to_torch(
+                    actor_batch, self.device
+                )
+            else:
+                num_batches_needed = int(np.ceil(self.batch_size_actor / self.batch_size))
+                actor_batches = [(obs, action, reward, next_obs)]
+                for _ in range(num_batches_needed - 1):
+                    batch = next(replay_iter)
+                    obs_b, action_b, reward_b, _, next_obs_b = utils.to_torch(batch, self.device)
+                    actor_batches.append((obs_b, action_b, reward_b, next_obs_b))
+                obs_actor = torch.cat([item[0] for item in actor_batches], dim=0)[:self.batch_size_actor]
+                action_actor = torch.cat([item[1] for item in actor_batches], dim=0)[:self.batch_size_actor]
+                reward_actor = torch.cat([item[2] for item in actor_batches], dim=0)[:self.batch_size_actor]
+                next_obs_actor = torch.cat([item[3] for item in actor_batches], dim=0)[:self.batch_size_actor]
 
             # update actor (now with rewards)
             metrics.update(self.update_actor(obs_actor, action_actor, next_obs_actor, step, rewards=reward_actor))

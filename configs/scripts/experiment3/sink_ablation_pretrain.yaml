@@ -1,0 +1,64 @@
+# @package _global_
+# Experiment 3: main-setting pixel ROVER sink-state ablation.
+defaults:
+  - /agent: rover_paper
+  - /env: gridworld/multiplerooms5_4x4_0
+  - _self_
+
+reward_free: true
+domain: gym
+task_name: ${env.name}
+obs_type: pixels
+frame_stack: 1
+action_repeat: 1
+discount: 0.99
+resolution: 84
+grayscale: false
+random_init: true
+random_goal: true
+update_actor_after_critic_steps: 0
+
+# Historical main pixel run budget. Do not replace with refactor default 1M.
+num_train_frames: 50_000
+num_seed_frames: 2_000
+eval_every_frames: 1_500
+num_eval_episodes: 20
+snapshots: [50_000]
+snapshot_dir: ${ablation_run_dir}/checkpoint
+
+replay_buffer_size: 1_000_000
+replay_buffer_num_workers: 1
+batch_size: ${agent.batch_size}
+nstep: ${agent.nstep}
+update_encoder: true
+save_buffer: true
+
+seed: 1
+device: cuda
+save_video: false
+save_train_video: false
+use_tb: false
+use_wandb: false
+wandb_project: rover_sink_ablation
+wandb_entity: none
+wandb_tag: experiment3
+wandb_run_name: experiment3
+wandb_id: none
+experiment: sink_state_ablation
+ablation_run_dir: ???
+ablation_metrics_path: ${ablation_run_dir}/pretrain.jsonl
+
+agent:
+  # Historical run settings and only crossed ablation axes.
+  lambda_reg: 1e-6
+  T_init_steps: 50
+  batch_size_actor: 5_000
+  sink_schedule: "linear(0.0, 0.004, 50_000)"
+
+env:
+  # Paper Appendix F.1 reports Multi-Room horizon H=300.
+  max_steps: 300
+
+hydra:
+  run:
+    dir: ${ablation_run_dir}/hydra
