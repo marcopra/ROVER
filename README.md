@@ -1,38 +1,101 @@
-# ROVER
+# ROVER: Reward-free Pretraining via Occupancy Coverage Maximization
 
-This repository contains code and Hydra configurations for reproducing the
-experiments in **Reward-free Pretraining for Reinforcement Learning via
-Occupancy Coverage Maximization**.
+Official implementation of **Reward-free Pretraining for Reinforcement Learning via Occupancy
+Coverage Maximization** (Pratticò, Novelli, Pontil, Ciliberto; NeurIPS 2026).
 
-ROVER learns a transferable reward-free exploration policy by optimizing
-occupancy coverage. The release is organized around the paper experiments:
-main-text coverage diagnostics and appendix policy-transfer/offline-transfer
-experiments.
+ROVER pretrains a *transferable exploration policy* without any reward. It minimises the squared
+RKHS norm of the discounted state occupancy, `J(pi) = ||mu_{d^pi}||^2_H` (equivalently, it maximises the
+metric Renyi-2 entropy of the occupancy and, in tabular problems, matches the uniform measure in MMD),
+using a learned **resolvent world model**: a kernel-ridge-regression estimate of the transition operator
+in a learned feature space, a closed-form gradient of `J` through the resolvent, policy mirror descent
+(PMD) in closed form, and a virtual **sink state** that makes unsupported regions costly and prevents
+expansion-collapse cycles.
 
-## Environment Setup
+## Algorithm in one page
+
+Alternate data collection (epsilon-greedy over the current policy) with
+
+1. **Representation learning** -- L1-normalised features `phi(x)` trained with InfoNCE on `(x, a, x')` (Eq. 9);
+2. **World model** -- sink-biased kernel ridge regression `T = Phi^T G Psi`, `G = (K + lambda I)^-1` (Eq. 17);
+3. **Policy mirror descent** -- `pi_{t+1}(.|x) = softmax(-eta <psi(x, .), Psi^T sum_s c_s>)` with the dual gradient
+   coefficients `c` of Thm. 2 (line-searched step size, best-iterate restoration).
+
+Two variants are implemented:
+
+| Variant | Used for | Code | Kernel(s) |
+| --- | --- | --- | --- |
+| **Standard ROVER** | gridworlds (Middle Room, Multi-Rooms, Maze, Two Rooms; one-hot and pixel observations) | `agent/rover.py`, `agent/rover_math.py` | inner product on learned features, all `n` transitions |
+| **Subspace ROVER** | PointMaze (App. E, G.8, Table 1) | `agent/rover_subspace.py`, `agent/nystrom.py`, `agent/landmarks.py` | Gaussian *dynamics* kernel on learned full-state features; Gaussian *coverage* kernel on the projection `g(s) = (x, y)`; Nystrom landmarks chosen by GPU pivoted Cholesky |
+
+Subspace ROVER measures coverage of the pushforward `g_# d^pi` while the world model still sees the full state
+(e.g. velocity). With `g = id` and the same kernel it reduces to standard ROVER (this is unit-tested).
+Details and verification: [`docs/implementation_summary.md`](docs/implementation_summary.md).
+
+## Installation
 
 ```bash
-conda env create -f environment.yml
+conda env create -f environment.yml     # Python 3.11, PyTorch (CUDA), Gymnasium(-Robotics), MuJoCo, MiniGrid, Hydra
 conda activate rover
+export MUJOCO_GL=egl                    # headless rendering for PointMaze pixel frames
+python -m pytest tests -q               # optional: unit tests (GPU tests are skipped without CUDA)
 ```
 
-Experiments were developed for Python 3.10 with CUDA-enabled GPUs. To run on
-CPU, override `device=cpu`.
+Runs use one GPU (`device=cuda`); override `device=cpu` for smoke tests.
 
-## Reproducing Paper Experiments
+## Repository structure
 
-All paper-run YAMLs live under `configs/scripts/`. They are launched directly
-through the existing Hydra entrypoints:
+```
+agent/rover.py              standard ROVER agent (encoder InfoNCE + dense PMD actor)
+agent/rover_math.py         occupancy objective, sink Gram and Thm. 2 gradient (factorisations cached)
+agent/rover_subspace.py     subspace ROVER agent (state observations)
+agent/nystrom.py            block-wise Nystrom occupancy model + reduced-rank gradient
+agent/landmarks.py          GPU pivoted-Cholesky landmark selection
+agent/kernels.py            Gaussian / inner-product kernels, median bandwidth
+agent/rover_networks.py     encoders and transition projector
+agent/{rnd,smm,icm_apt,maxent,cic,...}  reward-free baselines;  agent/{ddpg,sac,cql}*  downstream learners
+env/                        Multi-room / Maze / Middle-Room gridworlds, PointMaze wrapper (goal-hidden observations)
+configs/agent/              agent configs (rover_paper = standard ROVER of the paper)
+configs/scripts/            one YAML per paper experiment (see matrix below)
+pretrain.py, train.py       gridworld pretraining; downstream finetuning / offline training
+pretrain_pointmaze.py       subspace-ROVER PointMaze pretraining;  evaluate_pointmaze.py  coverage evaluation
+scripts/                    run wrappers and replay-buffer coverage analysis
+tests/                      gradient, Cholesky, Nystrom, goal-leakage, coverage and config tests
+docs/                       implementation summary, reproduction report, handoff notes
+```
+
+## Training and evaluation commands
+
+### Gridworlds (standard ROVER)
 
 ```bash
-python pretrain.py --config-name scripts/main_text/middle_room_behavior
-python pretrain.py --config-name scripts/main_text/multirooms_coverage_pixels seed=1
-python train.py --config-name scripts/appendix/two_rooms_finetune_ddpg p_path=/path/to/snapshot.pt
+python pretrain.py --config-name scripts/main_text/middle_room_behavior         # Fig. 2 / 7 (reward-free behaviour)
+python pretrain.py --config-name scripts/main_text/multirooms_coverage_discrete seed=1   # Fig. 3, one-hot
+python pretrain.py --config-name scripts/main_text/maze_coverage_pixels seed=1           # Fig. 3, 84x84 RGB
+scripts/run_gridworld.sh main_text/multirooms_coverage_discrete 0 "1 2 3 4 5"            # five seeds on GPU 0
+
+# Samples needed to reach 25/50/75/90/95/99/100 % state coverage, from the saved replay buffer:
+python scripts/coverage_speed.py exp_local/<date>/<run_dir>
 ```
 
-To run multiple seeds, repeat the same command with `seed=1`, `seed=2`, etc.
-The paper reports five seeds for online policy-transfer curves and seven seeds
-for the offline transfer table.
+Baselines use the same configs: append `agent=rnd_discrete | smm_discrete | icm_apt_discrete | maxent_discrete | cic_discrete`.
+Downstream transfer (Fig. 8-10) and offline replay transfer (Table 3):
+
+```bash
+python train.py --config-name scripts/appendix/two_rooms_finetune_ddpg p_path=/path/to/snapshot.pt
+python train.py --config-name scripts/appendix/offline_two_rooms_cql
+```
+
+### PointMaze (subspace ROVER)
+
+```bash
+python pretrain_pointmaze.py --config-name scripts/pointmaze/umaze_states seed=1 'env.pointmaze.start_position=[-1.0,1.0]'
+python evaluate_pointmaze.py results/pointmaze/umaze_states/start[-1.0,1.0]/seed1      # 3 evaluation seeds x 50 trajectories
+scripts/run_pointmaze_umaze.sh 0 "1 2 3"          # the full Table-1 protocol: 3 starts x 3 seeds, GPU 0
+```
+
+Coverage = percentage of free cells of a 90x90 maze grid (radius 0.08) visited by 50 stochastic-policy
+trajectories of 300 steps (the policy is evaluated epsilon-greedy, exactly as it explores).
+The three start positions are `[-1,1]`, `[1,1]`, `[1,0]`.
 
 ### Reproducibility Matrix
 
@@ -53,34 +116,27 @@ for the offline transfer table.
 | App. F.7, Table 2 | Offline replay-buffer transfer | Two Rooms | One-hot states | Offline DDPG reference | `configs/scripts/appendix/offline_two_rooms_ddpg.yaml` | `python train.py --config-name scripts/appendix/offline_two_rooms_ddpg` |
 | App. F.7, Table 2 | Offline replay-buffer transfer | Multi-Rooms | One-hot states | Offline DDPG reference | `configs/scripts/appendix/offline_multirooms_ddpg.yaml` | `python train.py --config-name scripts/appendix/offline_multirooms_ddpg` |
 
-The default pretraining configs use `agent=rover_paper`, a paper-tuned ROVER
-agent config. Baselines are selected with Hydra overrides. For example:
 
-```bash
-python pretrain.py --config-name scripts/main_text/middle_room_behavior agent=rnd_discrete seed=1
-python pretrain.py --config-name scripts/main_text/middle_room_behavior agent=smm_discrete seed=1
-python pretrain.py --config-name scripts/main_text/middle_room_behavior agent=icm_apt_discrete seed=1
-python pretrain.py --config-name scripts/main_text/middle_room_behavior agent=maxent_discrete seed=1
-python pretrain.py --config-name scripts/main_text/middle_room_behavior agent=cic_discrete seed=1
-```
+The default pretraining configs use `agent=rover_paper`. Goal locations are changed by selecting another
+environment config, e.g. `env=gridworld/multiplerooms5_4x4_1`; older appendix variants are in `configs/env/gridworld/appendix/`.
 
-Goal locations can be changed by selecting a different environment config:
+## Hyperparameters
 
-```bash
-python train.py --config-name scripts/appendix/multirooms_finetune_ddpg \
-  env=gridworld/multiplerooms5_4x4_1 \
-  p_path=/path/to/snapshot.pt \
-  seed=1
-```
+Defaults live in `configs/agent/rover_paper.yaml` (standard ROVER, each parameter is commented with its paper symbol)
+and in `configs/scripts/pointmaze/umaze_states.yaml` (subspace ROVER). Main values:
 
-Useful older Two Rooms and Multi-Rooms appendix variants are preserved under
-`configs/env/gridworld/appendix/`.
-
-## Main Algorithm Hyperparameters
-
-The table summarizes the principal algorithm settings encoded by the provided
-YAML configs and agent configs. Full details remain in `configs/agent/` and
-`configs/scripts/`; ROVER paper runs use `configs/agent/rover_paper.yaml`.
+| Parameter | Standard ROVER | Subspace ROVER (PointMaze) | Meaning |
+| --- | --- | --- | --- |
+| `discount` (gamma) | 0.9 (Middle Room), 0.99 (others) | 0.99 | occupancy discount |
+| `lambda_reg` (lambda) | 1e-3 | 1e-3 | KRR ridge |
+| `lr_actor` (eta) | 10 | 25 | PMD step size (initial value of the line search) |
+| `pmd_steps` | 250 | 5 | PMD iterations per actor update |
+| `sink_schedule` (eps) | `linear(0, 0.05, 50k)` | `linear(0, 5, 50k, 250k)` | sink scale |
+| `batch_size_actor` | 5000 (-> 4096 transitions) | 100 000 latest transitions | support of the world model |
+| `subsamples` / `pca_truncation` | - | 10 000 / 1000 | Nystrom landmarks / rank of the adjoint solve |
+| `feature_dim`, `hidden_dim` | 200, 1024 | 256, 1024 | encoder |
+| `epsilon_schedule` | 0.15 | 0.3 | epsilon-greedy |
+| `update_actor_every_steps` | 1500 | 20 000 | actor update period (frames) |
 
 | Algorithm | Role in paper experiments | Main hyperparameters |
 | --- | --- | --- |
@@ -94,23 +150,42 @@ YAML configs and agent configs. Full details remain in `configs/agent/` and
 | SAC | Pixel-based online finetuning | `actor_lr=1e-5`, `critic_lr=1e-5`, `alpha_lr=1e-5`, `init_temperature=0.1`, `critic_target_tau=0.01`, `actor_update_frequency=1`, `critic_target_update_frequency=1`, `feature_dim=200`, `batch_size=256`, `nstep=1` |
 | CQL | Offline replay-buffer transfer | `lr=1e-4`, `critic_target_tau=0.01`, `n_samples=3`, `alpha=0.01`, `target_cql_penalty=5.0`, `epsilon_schedule=linear(1.0,0.1,100000)`, `batch_size=1024`, `nstep=1` |
 
+
 ## Outputs
 
-Hydra writes run outputs under `exp_local/` for single runs and `exp_sweep/`
-for multirun sweeps. Pretraining checkpoints are written under
-`models/${obs_type}/${domain}/${agent.name}/${seed}`. Replay buffers are saved
-when `save_buffer=true`, which is enabled for the paper pretraining configs.
+Hydra writes single runs under `exp_local/<date>/...` (override with `hydra.run.dir=...`). Pretraining snapshots are
+written under `models/${obs_type}/${domain}/${agent.name}/${seed}`, replay buffers (`save_buffer=true`) to `buffer/`.
+PointMaze runs write `metrics.csv`, `final_snapshot.pt`, `results.json` (and `eval.json` after evaluation) to `output_dir`.
+All of these are git-ignored. W&B logging is off by default (`use_wandb=true` to enable).
 
-WandB logging is disabled by default in the reproducibility YAMLs. Enable it
-with `use_wandb=true` and set project/entity overrides as needed.
-
-## Quick Config Checks
-
-Use Hydra's config-print mode to check that configs compose without launching
-training:
+Check that a config composes without launching a run:
 
 ```bash
 python pretrain.py --config-name scripts/main_text/middle_room_behavior --cfg job
+```
 
-python train.py --config-name scripts/appendix/two_rooms_finetune_ddpg --cfg job
+## Reproducing the paper
+
+`docs/reproduction_report.md` lists, for a representative subset of the experiments, the exact commands, the
+reference numbers (marked as extracted from the paper or from the research logs) and the numbers measured with this
+repository. Full-scale reproduction (all seeds, pixel PointMaze, all baselines) is not included.
+
+## Known limitations
+
+* Pixel PointMaze (Table 1, right column) is not part of this release.
+* The goal-leakage fix changes observations relative to early research runs; results generated before the fix
+  (research commit `eb935af`) are not directly comparable (see `docs/implementation_summary.md`).
+* Subspace ROVER runs a single environment process; the reference runs used four parallel environments.
+* The Nystrom normal equations use fixed 1e-6 ridge jitters; very smooth kernels amplify them.
+* Only discrete action spaces are supported.
+
+## Citation
+
+```bibtex
+@inproceedings{prattico2026rover,
+  title     = {Reward-free Pretraining for Reinforcement Learning via Occupancy Coverage Maximization},
+  author    = {Pratticò, Marco and Novelli, Pietro and Pontil, Massimiliano and Ciliberto, Carlo},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2026}
+}
 ```
