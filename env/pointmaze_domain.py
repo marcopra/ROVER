@@ -19,11 +19,17 @@ def pop_point_maze_kwargs(env_kwargs):
 def prepare_point_maze_make_kwargs(name, env_kwargs, url=False):
     del name
     pointmaze_kwargs = pop_point_maze_kwargs(env_kwargs)
-    env_kwargs["reward_type"] = "dense"
+    reward_type = str(pointmaze_kwargs.get("reward_type", "dense")).lower()
+    if reward_type not in ("dense", "sparse"):
+        raise ValueError(
+            f"pointmaze.reward_type must be 'dense' or 'sparse', got {reward_type!r}"
+        )
+    env_kwargs["reward_type"] = reward_type
     env_kwargs["reset_target"] = True
-    env_kwargs.setdefault("continuing_task", False)
-    if url:
-        env_kwargs["continuing_task"] = True
+    # Keep an explicit environment setting authoritative. Training entrypoints
+    # pass url=True for legacy wrappers, but PointMaze configs can still require
+    # episodes to terminate when the agent reaches the goal.
+    env_kwargs.setdefault("continuing_task", bool(url))
     return env_kwargs, pointmaze_kwargs
 
 
@@ -50,7 +56,10 @@ class PointMazeDiscreteActions(gym.ActionWrapper):
         return self.action_scale * self.ACTIONS[action_idx].copy()
 
     def __getattr__(self, name):
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class PointMazeDirectVelocityActions(gym.Wrapper):
@@ -111,11 +120,14 @@ class PointMazeDirectVelocityActions(gym.Wrapper):
         return obs, reward, terminated, truncated, info
 
     def __getattr__(self, name):
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class FixedPointMazeResetWrapper(gym.Wrapper):
-    def __init__(self, env, goal_position, start_position):
+    def __init__(self, env, goal_position, start_position, start_position_variance=0.0):
         super().__init__(env)
         self.fixed_goal = np.asarray(goal_position, dtype=np.float32)
         if self.fixed_goal.shape != (2,):
@@ -125,8 +137,16 @@ class FixedPointMazeResetWrapper(gym.Wrapper):
         if self.fixed_start.shape != (2,):
             raise ValueError(f"PointMaze start_position must have shape (2,), got {self.fixed_start.shape}")
 
+        self.start_position_variance = float(start_position_variance)
+        if self.start_position_variance < 0.0:
+            raise ValueError(
+                "PointMaze start_position_variance must be non-negative, "
+                f"got {self.start_position_variance}"
+            )
+
         self.goal_position = self.fixed_goal.copy()
         self.start_position = self.fixed_start.copy()
+        self.current_start_position = self.fixed_start.copy()
 
     def _base_env(self):
         return self.env.unwrapped
@@ -136,34 +156,52 @@ class FixedPointMazeResetWrapper(gym.Wrapper):
         point_obs, _ = base_env.point_env._get_obs()
         return base_env._get_obs(point_obs)
 
-    def _apply_fixed_task(self):
+    def _sample_start_position(self):
+        if self.start_position_variance <= 0.0:
+            return self.fixed_start.copy()
+
+        base_env = self._base_env()
+        rng = getattr(base_env, "np_random", None)
+        std = np.sqrt(self.start_position_variance)
+        if rng is not None:
+            noise = rng.normal(loc=0.0, scale=std, size=2)
+        else:
+            noise = np.random.normal(loc=0.0, scale=std, size=2)
+        return (self.fixed_start + noise.astype(np.float32)).astype(np.float32)
+
+    def _apply_fixed_task(self, start_position):
         base_env = self._base_env()
         base_env.goal = self.fixed_goal.copy()
-        base_env.reset_pos = self.fixed_start.copy()
-        base_env.point_env.init_qpos[:2] = self.fixed_start
+        base_env.reset_pos = start_position.copy()
+        base_env.point_env.init_qpos[:2] = start_position
         base_env.point_env.init_qvel[:] = 0.0
 
         qpos = base_env.point_env.data.qpos.copy()
         qvel = np.zeros_like(base_env.point_env.data.qvel)
-        qpos[:2] = self.fixed_start
+        qpos[:2] = start_position
         base_env.point_env.set_state(qpos, qvel)
         base_env.update_target_site_pos()
 
     def reset(self, **kwargs):
         _, info = self.env.reset(**kwargs)
-        self._apply_fixed_task()
+        self.current_start_position = self._sample_start_position()
+        self.start_position = self.current_start_position.copy()
+        self._apply_fixed_task(self.current_start_position)
         obs = self._refresh_obs()
 
         info = dict(info) if info is not None else {}
         info["fixed_goal_position"] = self.fixed_goal.copy()
         info["fixed_start_position"] = self.fixed_start.copy()
+        info["start_position"] = self.current_start_position.copy()
+        info["start_position_variance"] = self.start_position_variance
         return obs, info
 
     def get_debug_coordinates(self):
         obs = self._refresh_obs()
         return {
             "xy": np.asarray(obs["observation"], dtype=np.float32)[:2].copy(),
-            "fixed_start": self.fixed_start.copy(),
+            "fixed_start": self.current_start_position.copy(),
+            "configured_start": self.fixed_start.copy(),
             "fixed_goal": self.fixed_goal.copy(),
         }
 
@@ -175,6 +213,7 @@ class FixedPointMazeResetWrapper(gym.Wrapper):
 
         half_cell = 0.5 * float(getattr(maze, "maze_size_scaling", 1.0))
         wall_rectangles = []
+        walkable_rectangles = []
         all_rectangles = []
 
         for row_idx, row in enumerate(maze.maze_map):
@@ -186,6 +225,8 @@ class FixedPointMazeResetWrapper(gym.Wrapper):
                 all_rectangles.append(rect)
                 if cell == 1:
                     wall_rectangles.append(rect)
+                else:
+                    walkable_rectangles.append(rect)
 
         if not all_rectangles:
             return None
@@ -194,15 +235,20 @@ class FixedPointMazeResetWrapper(gym.Wrapper):
         maze_lower = all_rectangles[:, :2].min(axis=0)
         maze_upper = (all_rectangles[:, :2] + all_rectangles[:, 2:4]).max(axis=0)
         wall_rectangles = np.asarray(wall_rectangles, dtype=np.float32).reshape(-1, 4)
+        walkable_rectangles = np.asarray(walkable_rectangles, dtype=np.float32).reshape(-1, 4)
 
         return {
             "maze_lower": maze_lower,
             "maze_upper": maze_upper,
             "wall_rectangles": wall_rectangles,
+            "walkable_rectangles": walkable_rectangles,
         }
 
     def __getattr__(self, name):
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class PointMazeTopDownCameraWrapper(gym.Wrapper):
@@ -267,7 +313,10 @@ class PointMazeTopDownCameraWrapper(gym.Wrapper):
         return render_fn() if callable(render_fn) else self.env.render()
 
     def __getattr__(self, name):
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class PointMazeGoalMaskWrapper(gym.Wrapper):
@@ -284,6 +333,11 @@ class PointMazeGoalMaskWrapper(gym.Wrapper):
         finally:
             base_env.model.site_rgba[base_env.target_site_id] = original_rgba
 
+    def render(self):
+        # Hide the target in regular renders too (videos/debugging), not only
+        # in the policy's pixel-observation path.
+        return self._render_without_goal()
+
     def render_observation(self):
         frame = self._render_without_goal()
         self._cached_hidden_render = frame
@@ -292,10 +346,6 @@ class PointMazeGoalMaskWrapper(gym.Wrapper):
     def render_image_observation(self):
         if self._cached_hidden_render is None:
             self._cached_hidden_render = self._render_without_goal()
-
-        # Uncomment the next line and comment the return below to render the goal
-        # in image_observation while keeping observation goal-hidden.
-        # return self.env.render()
         return self._cached_hidden_render.copy()
 
     def reset(self, **kwargs):
@@ -307,7 +357,10 @@ class PointMazeGoalMaskWrapper(gym.Wrapper):
         return self.env.step(action)
 
     def __getattr__(self, name):
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 class PointMazeXYObservationWrapper(gym.Wrapper):
@@ -340,13 +393,75 @@ class PointMazeXYObservationWrapper(gym.Wrapper):
         return self._xy_observation(obs), reward, terminated, truncated, info
 
     def __getattr__(self, name):
-        return getattr(self.env, name)
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
+
+
+class PointMazeAgentStateObservationWrapper(gym.Wrapper):
+    """Expose PointMaze's agent observation without achieved/desired-goal fields."""
+
+    def __init__(self, env):
+        super().__init__(env)
+        observation_space = env.observation_space
+        if isinstance(observation_space, spaces.Dict):
+            state_space = observation_space.spaces.get("observation")
+            if state_space is None:
+                raise ValueError(
+                    "PointMaze agent-state observation requires an 'observation' space"
+                )
+            low = np.asarray(state_space.low, dtype=np.float32)
+            high = np.asarray(state_space.high, dtype=np.float32)
+            self.observation_space = spaces.Box(
+                low=low,
+                high=high,
+                shape=state_space.shape,
+                dtype=np.float32,
+            )
+        else:
+            self.observation_space = observation_space
+        shape = getattr(self.observation_space, "shape", None)
+        if shape is None or len(shape) != 1:
+            raise ValueError(
+                "PointMaze agent-state observation must be a flat vector, "
+                f"got shape {shape}"
+            )
+
+    def _agent_state(self, obs):
+        if isinstance(obs, dict):
+            if "observation" not in obs:
+                raise ValueError("PointMaze observation is missing 'observation' state field")
+            obs = obs["observation"]
+        state = np.asarray(obs, dtype=np.float32).reshape(-1)
+        expected = int(np.prod(self.observation_space.shape))
+        if state.size != expected:
+            raise ValueError(
+                f"PointMaze agent state expected {expected} values, got {state.size}"
+            )
+        return state.copy()
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        return self._agent_state(obs), info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        return self._agent_state(obs), reward, terminated, truncated, info
+
+    def __getattr__(self, name):
+        env = self.__dict__.get("env")
+        if env is None:
+            raise AttributeError(name)
+        return getattr(env, name)
 
 
 def wrap_point_maze_env(env, pointmaze_kwargs):
     pointmaze_kwargs = coerce_dict(pointmaze_kwargs, "pointmaze")
+    reward_type = str(pointmaze_kwargs.pop("reward_type", "dense")).lower()
     goal_position = pointmaze_kwargs.pop("goal_position", None)
     start_position = pointmaze_kwargs.pop("start_position", None)
+    start_position_variance = pointmaze_kwargs.pop("start_position_variance", 0.0)
     top_down_camera = bool(pointmaze_kwargs.pop("top_down_camera", True))
     camera_distance = pointmaze_kwargs.pop("camera_distance", None)
     camera_elevation = pointmaze_kwargs.pop("camera_elevation", -90.0)
@@ -356,6 +471,7 @@ def wrap_point_maze_env(env, pointmaze_kwargs):
     max_velocity = pointmaze_kwargs.pop("max_velocity", 1.0)
     preserve_target_velocity = bool(pointmaze_kwargs.pop("preserve_target_velocity", True))
     only_xy_position = bool(pointmaze_kwargs.pop("only_xy_position", False))
+    only_agent_state = bool(pointmaze_kwargs.pop("only_agent_state", False))
 
     if goal_position is None:
         raise ValueError("PointMaze environments require pointmaze.goal_position to keep the goal fixed")
@@ -365,7 +481,12 @@ def wrap_point_maze_env(env, pointmaze_kwargs):
         unknown_keys = ", ".join(sorted(pointmaze_kwargs))
         raise TypeError(f"Unknown PointMaze kwargs: {unknown_keys}")
 
-    env = FixedPointMazeResetWrapper(env, goal_position=goal_position, start_position=start_position)
+    env = FixedPointMazeResetWrapper(
+        env,
+        goal_position=goal_position,
+        start_position=start_position,
+        start_position_variance=start_position_variance,
+    )
     if top_down_camera:
         env = PointMazeTopDownCameraWrapper(
             env,
@@ -391,15 +512,19 @@ def wrap_point_maze_env(env, pointmaze_kwargs):
     else:
         action_description = "continuous force actions"
 
+    if only_agent_state:
+        env = PointMazeAgentStateObservationWrapper(env)
     if only_xy_position:
         env = PointMazeXYObservationWrapper(env)
 
     warning = (
         "Warning: PointMaze environment uses fixed goal and initial position, "
-        f"{action_description}, dense reward, and goal-hidden pixel observations."
+        f"{action_description}, {reward_type} reward, and goal-hidden rendering."
     )
     if only_xy_position:
         warning += " State observations are masked to agent XY position only."
+    elif only_agent_state:
+        warning += " State observations expose full agent state only."
     if getattr(env.unwrapped, "continuing_task", False):
         warning += " continuing_task=True keeps the episode from terminating at success."
     utils.ColorPrint.yellow(warning)
