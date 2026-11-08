@@ -26,9 +26,6 @@ import torch.nn.functional as F
 import utils
 from agent.rover_math import DenseOccupancyModel, ResolventSolution, sink_residual_gram
 from agent.rover_networks import CNNEncoder, Encoder, ProjectSA  # noqa: F401  (CNNEncoder is re-exported)
-from agent.rover_visualization.exploration import ExplorationVisualizer
-from agent.rover_visualization.gridworld import EmbeddingDistributionVisualizerV2
-from agent.rover_visualization.suite import build_debug_visualizer_suite
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +62,6 @@ class RoverAgent:
         pmd_backtrack_factor: float = 0.25,
         pmd_backtrack_max_trials: int = 12,
         device: str = "cpu",
-        debug_plots: bool = False,
     ):
         assert obs_type in ("pixels", "states", "discrete_states"), obs_type
         assert batch_size_actor >= batch_size, (
@@ -126,18 +122,6 @@ class RoverAgent:
         self.current_eta = 0.0
         self.current_action_probs = []
 
-        # t-SNE / occupancy diagnostics are CPU-heavy; they are off unless explicitly requested.
-        self.debug_visualizer = None
-        self.visualizer = None
-        if debug_plots:
-            self.debug_visualizer = build_debug_visualizer_suite(
-                agent=self,
-                exploration_visualizer_cls=ExplorationVisualizer,
-                gridworld_visualizer_cls=EmbeddingDistributionVisualizerV2,
-            )
-            self.visualizer = self.debug_visualizer.exploration_visualizer
-        self.gridworld_visualizer = None
-        self.env = None
 
     # ------------------------------------------------------------------ interface
     def train(self, training: bool = True) -> None:
@@ -154,12 +138,6 @@ class RoverAgent:
 
     def update_meta(self, meta, global_step, time_step, finetune=False):
         return meta
-
-    def insert_env(self, env) -> None:
-        """Attach an environment for domain-specific diagnostic plots only."""
-        self.env = env
-        if self.debug_visualizer is not None:
-            self.gridworld_visualizer = self.debug_visualizer.attach_env(env)
 
     def ready_for_snapshot(self) -> bool:
         return self._policy_is_synced
@@ -332,7 +310,6 @@ class RoverAgent:
         obs_actor, action_actor, next_obs_actor = (torch.cat(field, dim=0) for field in zip(*batches))
         metrics.update(self.update_actor(obs_actor, action_actor, next_obs_actor, step))
         self._log_policy_statistics(metrics)
-        self._run_debug_visualizers(metrics, obs_actor, step)
         return metrics
 
     def _log_policy_statistics(self, metrics: Dict[str, float]) -> None:
@@ -344,20 +321,3 @@ class RoverAgent:
             np.mean(0.5 * np.abs(probs - 1.0 / self.n_actions).sum(axis=-1))
         )
         self.current_action_probs = []
-
-    def _run_debug_visualizers(self, metrics: Dict[str, float], obs_actor: torch.Tensor, step: int) -> None:
-        if self.debug_visualizer is None:
-            return
-        param_text = (
-            f"Step: {step}\n"
-            f"gamma = {self.discount}\n"
-            f"eta = {self.current_eta}\n"
-            f"lambda = {self.lambda_reg}\n"
-            f"sink norm = {utils.schedule(self.sink_schedule, step):.6f}\n"
-            f"PMD steps = {self.pmd_steps}\n"
-        )
-        metrics.update(
-            self.debug_visualizer.save(
-                step=step, obs_batch=obs_actor, z_batch=self._phi_all_obs[:, :-1], param_text=param_text
-            )
-        )
