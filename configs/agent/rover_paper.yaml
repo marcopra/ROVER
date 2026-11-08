@@ -32,4 +32,3 @@ total_train_steps: ${num_train_frames}
 use_tb: ${use_tb}
 use_wandb: ${use_wandb}
 device: ${device}
-debug_plots: false           # t-SNE / occupancy diagnostic figures (slow)
