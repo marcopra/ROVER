@@ -82,7 +82,7 @@ Downstream transfer (Fig. 8-10) and offline replay transfer (Table 3):
 
 ```bash
 python train.py --config-name scripts/appendix/two_rooms_finetune_ddpg p_path=/path/to/snapshot.pt
-python train.py --config-name scripts/appendix/offline_two_rooms_cql
+python train_offline.py --config-name scripts/appendix/offline_two_rooms_cql replay_buffer_dir=/path/to/pretraining/buffer
 ```
 
 ### PointMaze (subspace ROVER)
@@ -106,15 +106,16 @@ The three start positions are `[-1,1]`, `[1,1]`, `[1,0]`.
 | Sec. 4.2, Fig. 3 | Full-coverage sample efficiency | Multi-Rooms | 84x84 RGB | ROVER and pixel-capable baselines | `configs/scripts/main_text/multirooms_coverage_pixels.yaml` | `python pretrain.py --config-name scripts/main_text/multirooms_coverage_pixels` |
 | Sec. 4.2, Fig. 3 | Full-coverage sample efficiency | Maze | One-hot states | ROVER and baselines | `configs/scripts/main_text/maze_coverage_discrete.yaml` | `python pretrain.py --config-name scripts/main_text/maze_coverage_discrete` |
 | Sec. 4.2, Fig. 3 | Full-coverage sample efficiency | Maze | 84x84 RGB | ROVER and pixel-capable baselines | `configs/scripts/main_text/maze_coverage_pixels.yaml` | `python pretrain.py --config-name scripts/main_text/maze_coverage_pixels` |
-| App. F.3, Fig. 8 | Reward-free pretraining for transfer | Two Rooms | One-hot states | ROVER and baselines | `configs/scripts/appendix/two_rooms_pretrain.yaml` | `python pretrain.py --config-name scripts/appendix/two_rooms_pretrain` |
-| App. F.3, Fig. 8 | Online policy transfer | Two Rooms | One-hot states | DDPG, DDPG + pretrained policy | `configs/scripts/appendix/two_rooms_finetune_ddpg.yaml` | `python train.py --config-name scripts/appendix/two_rooms_finetune_ddpg p_path=/path/to/snapshot.pt` |
-| App. F.4-F.6, Fig. 9-10, Table 1 | Reward-free pretraining for transfer/scaling | Multi-Rooms | One-hot states | ROVER and baselines | `configs/scripts/appendix/multirooms_pretrain.yaml` | `python pretrain.py --config-name scripts/appendix/multirooms_pretrain` |
-| App. F.4-F.5, Fig. 9-10 | Online DDPG transfer | Multi-Rooms | One-hot states | DDPG, DDPG + pretrained policy | `configs/scripts/appendix/multirooms_finetune_ddpg.yaml` | `python train.py --config-name scripts/appendix/multirooms_finetune_ddpg p_path=/path/to/snapshot.pt` |
-| App. F.4, Fig. 9 | Online SAC transfer | Multi-Rooms | 84x84 RGB | SAC, SAC + pretrained policy | `configs/scripts/appendix/multirooms_finetune_sac.yaml` | `python train.py --config-name scripts/appendix/multirooms_finetune_sac p_path=/path/to/snapshot.pt` |
-| App. F.7, Table 2 | Offline replay-buffer transfer | Two Rooms | One-hot states | CQL | `configs/scripts/appendix/offline_two_rooms_cql.yaml` | `python train.py --config-name scripts/appendix/offline_two_rooms_cql` |
-| App. F.7, Table 2 | Offline replay-buffer transfer | Multi-Rooms | One-hot states | CQL | `configs/scripts/appendix/offline_multirooms_cql.yaml` | `python train.py --config-name scripts/appendix/offline_multirooms_cql` |
-| App. F.7, Table 2 | Offline replay-buffer transfer | Two Rooms | One-hot states | Offline DDPG reference | `configs/scripts/appendix/offline_two_rooms_ddpg.yaml` | `python train.py --config-name scripts/appendix/offline_two_rooms_ddpg` |
-| App. F.7, Table 2 | Offline replay-buffer transfer | Multi-Rooms | One-hot states | Offline DDPG reference | `configs/scripts/appendix/offline_multirooms_ddpg.yaml` | `python train.py --config-name scripts/appendix/offline_multirooms_ddpg` |
+| App. G.3, Fig. 8 | Reward-free pretraining for transfer | Two Rooms | One-hot states | ROVER and baselines | `configs/scripts/appendix/two_rooms_pretrain.yaml` | `python pretrain.py --config-name scripts/appendix/two_rooms_pretrain` |
+| App. G.3, Fig. 8 | Online policy transfer | Two Rooms | One-hot states | DDPG, DDPG + pretrained policy | `configs/scripts/appendix/two_rooms_finetune_ddpg.yaml` | `python train.py --config-name scripts/appendix/two_rooms_finetune_ddpg p_path=/path/to/snapshot.pt` |
+| App. G.4-G.6, Fig. 9-10, Table 2 | Reward-free pretraining for transfer/scaling | Multi-Rooms | One-hot states | ROVER and baselines | `configs/scripts/appendix/multirooms_pretrain.yaml` | `python pretrain.py --config-name scripts/appendix/multirooms_pretrain` |
+| App. G.4-G.5, Fig. 9-10 | Online DDPG transfer | Multi-Rooms | One-hot states | DDPG, DDPG + pretrained policy | `configs/scripts/appendix/multirooms_finetune_ddpg.yaml` | `python train.py --config-name scripts/appendix/multirooms_finetune_ddpg p_path=/path/to/snapshot.pt` |
+| App. G.4, Fig. 9 | Online SAC transfer | Multi-Rooms | 84x84 RGB | SAC, SAC + pretrained policy | `configs/scripts/appendix/multirooms_finetune_sac.yaml` | `python train.py --config-name scripts/appendix/multirooms_finetune_sac p_path=/path/to/snapshot.pt` |
+| App. G.7, Table 3 | Offline replay-buffer transfer | Two Rooms | One-hot states | CQL | `configs/scripts/appendix/offline_two_rooms_cql.yaml` | `python train_offline.py --config-name scripts/appendix/offline_two_rooms_cql replay_buffer_dir=/path/to/pretraining/buffer` |
+| App. G.7, Table 3 | Offline replay-buffer transfer | Multi-Rooms | One-hot states | CQL | `configs/scripts/appendix/offline_multirooms_cql.yaml` | `python train_offline.py --config-name scripts/appendix/offline_multirooms_cql replay_buffer_dir=/path/to/pretraining/buffer` |
+| App. G.7, Table 3 | Offline replay-buffer transfer | Two Rooms | One-hot states | Offline DDPG reference | `configs/scripts/appendix/offline_two_rooms_ddpg.yaml` | `python train_offline.py --config-name scripts/appendix/offline_two_rooms_ddpg replay_buffer_dir=/path/to/pretraining/buffer` |
+| App. G.7, Table 3 | Offline replay-buffer transfer | Multi-Rooms | One-hot states | Offline DDPG reference | `configs/scripts/appendix/offline_multirooms_ddpg.yaml` | `python train_offline.py --config-name scripts/appendix/offline_multirooms_ddpg replay_buffer_dir=/path/to/pretraining/buffer` |
+| Sec. 4.3, Table 1 | Position coverage (subspace ROVER) | PointMaze U-Maze | (x, y, vx, vy) states | ROVER, RND, SMM, ICM-APT, MAXENT, CIC | `configs/scripts/pointmaze/umaze_states.yaml` | `python pretrain_pointmaze.py --config-name scripts/pointmaze/umaze_states seed=1` |
 
 
 The default pretraining configs use `agent=rover_paper`. Goal locations are changed by selecting another
