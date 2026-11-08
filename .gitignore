@@ -215,3 +215,11 @@ results
 *.err
 tmp*
 data_plot/
+# ROVER runtime artifacts
+.beads/
+exp_local/
+exp_sweep/
+models/
+outputs/
+results/
+wandb/
