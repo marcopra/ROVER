@@ -57,7 +57,7 @@ eval:
   grid_size: 90
   radius: 0.08
 
-output_dir: results/pointmaze/umaze_states/start${env.pointmaze.start_position}/seed${seed}
+output_dir: results/pointmaze/umaze_states/seed${seed}   # override per start position (see scripts/run_pointmaze_umaze.sh)
 
 hydra:
   run:

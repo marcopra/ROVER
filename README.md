@@ -89,7 +89,7 @@ python train_offline.py --config-name scripts/appendix/offline_two_rooms_cql rep
 
 ```bash
 python pretrain_pointmaze.py --config-name scripts/pointmaze/umaze_states seed=1 'env.pointmaze.start_position=[-1.0,1.0]'
-python evaluate_pointmaze.py results/pointmaze/umaze_states/start[-1.0,1.0]/seed1      # 3 evaluation seeds x 50 trajectories
+python evaluate_pointmaze.py results/pointmaze/umaze_states/start_-1.0_1.0/seed1      # 3 evaluation seeds x 50 trajectories
 scripts/run_pointmaze_umaze.sh 0 "1 2 3"          # the full Table-1 protocol: 3 starts x 3 seeds, GPU 0
 ```
 
