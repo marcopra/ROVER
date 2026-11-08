@@ -67,15 +67,21 @@ class CNNEncoder(nn.Module):
 
 
 class ProjectSA(nn.Module):
-    """Predicts the next-state embedding from psi(x, a) = phi(x) (x) e_a."""
+    """Predicts the next-state embedding from psi(x, a) = phi(x) (x) e_a.
 
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
+    ``linear=True`` uses a single bias-free linear map (the "linear predictor W" of Eq. 9).
+    """
+
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, linear: bool = False):
         super().__init__()
-        self.project_sa = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim, bias=False),
-            nn.SiLU(inplace=True),
-            nn.Linear(hidden_dim, output_dim, bias=False),
-        )
+        if linear:
+            self.project_sa = nn.Linear(input_dim, output_dim, bias=False)
+        else:
+            self.project_sa = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim, bias=False),
+                nn.SiLU(inplace=True),
+                nn.Linear(hidden_dim, output_dim, bias=False),
+            )
 
     def forward(self, encoded_state_action: torch.Tensor) -> torch.Tensor:
         return self.project_sa(encoded_state_action)

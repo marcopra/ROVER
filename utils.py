@@ -321,6 +321,12 @@ def schedule(schdl, step):
     try:
         return float(schdl)
     except ValueError:
+        # linear(init, final, start, end): hold `init` until step `start`, then ramp to `final` at `end`.
+        match = re.match(r'linear\((.+),(.+),(.+),(.+)\)', schdl)
+        if match:
+            init, final, start, end = [float(g) for g in match.groups()]
+            mix = np.clip((step - start) / (end - start), 0.0, 1.0)
+            return (1.0 - mix) * init + mix * final
         match = re.match(r'linear\((.+),(.+),(.+)\)', schdl)
         if match:
             init, final, duration = [float(g) for g in match.groups()]

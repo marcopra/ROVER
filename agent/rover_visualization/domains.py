@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -132,6 +133,99 @@ def _prepare_trajectories(trajectories) -> list[np.ndarray]:
     return prepared
 
 
+def pointmaze_free_space_coverage(
+    env,
+    trajectories,
+    grid_size: int = 90,
+    radius: float = 0.08,
+) -> tuple[int, int, float]:
+    """Measure trajectory coverage over a regular grid of PointMaze free space."""
+    if grid_size < 2:
+        raise ValueError("grid_size must be at least 2")
+    if radius <= 0:
+        raise ValueError("radius must be positive")
+
+    prepared = _prepare_trajectories(trajectories)
+    if not prepared:
+        raise ValueError("coverage requires at least one valid trajectory point")
+
+    layout = _get_pointmaze_wall_layout(env)
+    if layout is None:
+        raise AttributeError("PointMaze environment has no valid get_debug_maze_layout()")
+
+    lower = layout["maze_lower"]
+    upper = layout["maze_upper"]
+    walls = layout["wall_rectangles"]
+    xs = np.linspace(lower[0], upper[0], grid_size, dtype=np.float32)
+    ys = np.linspace(lower[1], upper[1], grid_size, dtype=np.float32)
+    grid = np.stack(np.meshgrid(xs, ys), axis=-1).reshape(-1, 2)
+
+    inside_wall = np.zeros(len(grid), dtype=bool)
+    if walls.size:
+        x = grid[:, 0:1]
+        y = grid[:, 1:2]
+        inside_wall = (
+            (x >= walls[:, 0])
+            & (x <= walls[:, 0] + walls[:, 2])
+            & (y >= walls[:, 1])
+            & (y <= walls[:, 1] + walls[:, 3])
+        ).any(axis=1)
+    free = grid[~inside_wall]
+    if len(free) == 0:
+        raise ValueError("PointMaze layout contains no free grid points")
+
+    samples = np.concatenate(prepared, axis=0)
+    covered = np.zeros(len(free), dtype=bool)
+    radius_sq = float(radius) ** 2
+    for start in range(0, len(free), 2048):
+        chunk = free[start : start + 2048]
+        distances = ((chunk[:, None, :] - samples[None, :, :]) ** 2).sum(axis=2)
+        covered[start : start + len(chunk)] = distances.min(axis=1) <= radius_sq
+
+    covered_count = int(covered.sum())
+    free_count = int(len(free))
+    return covered_count, free_count, 100.0 * covered_count / free_count
+
+
+@dataclass
+class CoverageProgress:
+    """Track checkpoint-to-checkpoint coverage growth for logging."""
+
+    tolerance: float = 0.25
+    previous_coverage: Optional[float] = None
+    previous_frame: Optional[int] = None
+    best_coverage: float = 0.0
+
+    def update(self, coverage_pct: float, frame: int) -> dict[str, float]:
+        coverage_pct = float(coverage_pct)
+        frame = int(frame)
+        if not np.isfinite(coverage_pct):
+            raise ValueError("coverage_pct must be finite")
+        if frame < 0:
+            raise ValueError("frame must be non-negative")
+        if self.previous_frame is not None and frame <= self.previous_frame:
+            raise ValueError("coverage frames must increase strictly")
+
+        delta = 0.0 if self.previous_coverage is None else coverage_pct - self.previous_coverage
+        frame_delta = 0 if self.previous_frame is None else frame - self.previous_frame
+        gain_per_100k = 0.0 if frame_delta == 0 else delta * 100_000.0 / frame_delta
+        self.best_coverage = max(self.best_coverage, coverage_pct)
+        self.previous_coverage = coverage_pct
+        self.previous_frame = frame
+        return {
+            "coverage_pct": coverage_pct,
+            "coverage_delta": delta,
+            "coverage_best": self.best_coverage,
+            "coverage_gain_per_100k": gain_per_100k,
+            "coverage_expanding": float(delta > self.tolerance),
+        }
+
+
+def pointmaze_evaluation_seed(training_seed: int, frame: int, episode: int = 0) -> int:
+    """Stable per-run, per-checkpoint seed without Python hash randomization."""
+    return int(training_seed) * 1_000_003 + int(frame) + int(episode)
+
+
 def _trajectory_colors(n_trajectories: int) -> list:
     if n_trajectories <= 10:
         cmap = plt.get_cmap("tab10")
@@ -219,7 +313,7 @@ def _draw_start_goal_markers(ax, env, trajectories: list[np.ndarray]) -> None:
             starts[:, 1],
             marker="o",
             s=22,
-            facecolors="white",
+            facecolors="red",
             edgecolors="black",
             linewidths=0.7,
             zorder=7,
@@ -500,6 +594,191 @@ def _paper_trajectory_rc() -> dict:
         "pdf.fonttype": 42,
         "ps.fonttype": 42,
     }
+
+
+def _get_pointmaze_wall_layout(env):
+    method = _get_env_method(env, "get_debug_maze_layout")
+    if not callable(method):
+        return None
+
+    layout = method()
+    if not isinstance(layout, dict):
+        return None
+
+    required = ("maze_lower", "maze_upper", "wall_rectangles")
+    if any(key not in layout for key in required):
+        return None
+
+    return {
+        "maze_lower": np.asarray(layout["maze_lower"], dtype=np.float32),
+        "maze_upper": np.asarray(layout["maze_upper"], dtype=np.float32),
+        "wall_rectangles": np.asarray(layout["wall_rectangles"], dtype=np.float32).reshape(-1, 4),
+    }
+
+
+def _smooth_trajectory_for_overlay(trajectory: np.ndarray, points_per_segment: int = 4) -> np.ndarray:
+    if trajectory.shape[0] < 3:
+        return trajectory
+
+    pieces = []
+    for idx in range(trajectory.shape[0] - 1):
+        p0 = trajectory[max(idx - 1, 0)]
+        p1 = trajectory[idx]
+        p2 = trajectory[idx + 1]
+        p3 = trajectory[min(idx + 2, trajectory.shape[0] - 1)]
+        t_values = np.linspace(0.0, 1.0, points_per_segment, endpoint=False, dtype=np.float32)
+        for t in t_values:
+            t2 = t * t
+            t3 = t2 * t
+            point = 0.5 * (
+                (2.0 * p1)
+                + (-p0 + p2) * t
+                + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+                + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+            )
+            pieces.append(point)
+    pieces.append(trajectory[-1])
+    return np.asarray(pieces, dtype=np.float32)
+
+
+def _draw_overlay_maze_walls(ax, wall_rectangles: np.ndarray, wall_color: str) -> None:
+    if wall_rectangles.size == 0:
+        return
+
+    rounded = np.round(wall_rectangles, decimals=5)
+    wall_cells = {
+        (float(x0), float(y0), float(width), float(height))
+        for x0, y0, width, height in rounded
+    }
+
+    for x0, y0, width, height in wall_cells:
+        ax.add_patch(
+            patches.Rectangle(
+                (x0, y0),
+                width,
+                height,
+                facecolor=wall_color,
+                edgecolor="none",
+                zorder=1,
+            )
+        )
+
+    for x0, y0, width, height in wall_cells:
+        neighbors = (
+            ((x0, y0 - height, width, height), ((x0, x0 + width), (y0, y0))),
+            ((x0, y0 + height, width, height), ((x0, x0 + width), (y0 + height, y0 + height))),
+            ((x0 - width, y0, width, height), ((x0, x0), (y0, y0 + height))),
+            ((x0 + width, y0, width, height), ((x0 + width, x0 + width), (y0, y0 + height))),
+        )
+        for neighbor, segment in neighbors:
+            if neighbor in wall_cells:
+                continue
+            xs, ys = segment
+            ax.plot(
+                xs,
+                ys,
+                color="black",
+                linewidth=2.4,
+                solid_capstyle="round",
+                solid_joinstyle="round",
+                zorder=3,
+            )
+
+
+def save_maze_trajectory_overlay_plot(
+    trajectories,
+    env,
+    step: int,
+    save_dir: str | os.PathLike = "eval_trajectory_plots",
+) -> dict[str, str]:
+    trajectories = _prepare_trajectories(trajectories)
+    if not trajectories:
+        return {}
+
+    layout = _get_pointmaze_wall_layout(env)
+    if layout is None:
+        return save_eval_trajectory_plots(
+            trajectories=trajectories,
+            env=env,
+            step=step,
+            save_dir=save_dir,
+            styles=("colored",),
+        )
+
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    save_path = save_dir / f"eval_trajectories_step_{step}_ntraj_{len(trajectories)}_H_{len(trajectories[0])}_maze_overlay.png"
+
+    lower = layout["maze_lower"]
+    upper = layout["maze_upper"]
+    wall_rectangles = layout["wall_rectangles"]
+    span = upper - lower
+    pad = 0.35 * float(max(span[0], span[1])) / 12.0
+
+    wall_color = "#2f3f58"
+    colors = plt.get_cmap("plasma")(np.linspace(0.15, 0.85, max(len(trajectories), 2)))
+
+    with plt.rc_context(
+        {
+            "figure.facecolor": "white",
+            "axes.facecolor": "white",
+            "savefig.facecolor": "white",
+            "savefig.transparent": False,
+            "lines.solid_capstyle": "round",
+            "lines.solid_joinstyle": "round",
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(8.0, 6.05))
+        ax.set_facecolor("white")
+
+        _draw_overlay_maze_walls(ax, wall_rectangles, wall_color)
+
+        for idx, trajectory in enumerate(trajectories):
+            # Use raw sampled positions for maze overlays. Spline smoothing can overshoot
+            # tight corners and visually cut through walls even when the simulator did not.
+            path = trajectory
+            color = colors[idx]
+            ax.plot(
+                path[:, 0],
+                path[:, 1],
+                color=color,
+                linewidth=2.8,
+                alpha=0.9,
+                zorder=5,
+            )
+            if path.shape[0] >= 2:
+                start = max(path.shape[0] - 5, 0)
+                ax.annotate(
+                    "",
+                    xy=path[-1],
+                    xytext=path[start],
+                    arrowprops=dict(
+                        arrowstyle="-|>",
+                        color=color,
+                        lw=2.8,
+                        mutation_scale=8.0,
+                        shrinkA=0.0,
+                        shrinkB=0.0,
+                    ),
+                    zorder=6,
+                )
+
+        starts = np.asarray([trajectory[0] for trajectory in trajectories])
+        ax.scatter(
+            starts[:, 0], starts[:, 1], s=55, color="red",
+            edgecolors="white", linewidths=0.8, zorder=7, label="start",
+        )
+
+        ax.set_xlim(float(lower[0] - pad), float(upper[0] + pad))
+        ax.set_ylim(float(lower[1] - pad), float(upper[1] + pad))
+        ax.set_aspect("equal", adjustable="box")
+        ax.axis("off")
+        fig.subplots_adjust(left=0.015, right=0.985, bottom=0.015, top=0.985)
+        fig.savefig(save_path, dpi=300)
+        plt.close(fig)
+
+    print(f"Evaluation trajectory maze overlay saved: {save_path}")
+    return {"maze_overlay": str(save_path)}
 
 
 def save_eval_trajectory_plots(
@@ -926,9 +1205,14 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
         if points.shape[0] > 1:
             deltas = points[:, None, :] - points[None, :, :]
             distances = np.linalg.norm(deltas, axis=2)
-            distances = distances[distances > 1e-6]
-            if distances.size:
-                base_scale = min(base_scale, float(np.min(distances)) * 1.35)
+            distances[distances <= 1e-6] = np.inf
+            nearest = distances.min(axis=1)
+            nearest = nearest[np.isfinite(nearest)]
+            if nearest.size:
+                # One explicitly inserted start point can sit very close to a
+                # regular probe. Global minimum then makes every glyph tiny.
+                # Median nearest-neighbor distance represents grid spacing.
+                base_scale = min(base_scale, float(np.median(nearest)) * 1.35)
 
         return max(base_scale * 0.45, 0.08)
 
@@ -965,13 +1249,24 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
         return image_chw
 
     def _observation_for_policy_probe_point(self, xy: np.ndarray) -> np.ndarray:
+        xy = np.asarray(xy, dtype=np.float32).reshape(-1)[:2]
+        if getattr(self.agent, "obs_type", None) != "pixels":
+            obs_shape = tuple(getattr(self.agent, "obs_shape", ()))
+            obs_dim = int(np.prod(obs_shape)) if obs_shape else 0
+            if obs_dim == 4:
+                # Compare policy probabilities at identical zero velocity,
+                # while varying only the XY probe position.
+                return np.concatenate((xy, np.zeros(2, dtype=np.float32))).reshape(obs_shape)
+            if obs_dim == 2:
+                return xy.reshape(obs_shape)
+
         debug_helper = getattr(self.agent, "nystrom_debug", None)
         observation_from_xy = getattr(debug_helper, "observation_from_xy", None)
         if callable(observation_from_xy):
             return observation_from_xy(self.agent, xy)
 
         if getattr(self.agent, "obs_type", None) != "pixels":
-            return np.asarray(xy, dtype=np.float32).reshape(getattr(self.agent, "obs_shape", (2,)))
+            return xy.reshape(getattr(self.agent, "obs_shape", (2,)))
 
         render_from_position = _get_env_method(self.env, "render_from_position")
         if not callable(render_from_position):
@@ -1154,10 +1449,31 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
             extent=[lower[0], upper[0], lower[1], upper[1]],
             cmap="viridis",
         )
+        trajectories = getattr(self, "_last_trajectories", ())
+        colors = plt.get_cmap("tab10")
+        for trajectory_idx, trajectory in enumerate(trajectories):
+            ax.plot(
+                trajectory[:, 0],
+                trajectory[:, 1],
+                color=colors(trajectory_idx % 10),
+                linewidth=0.8,
+                alpha=0.65,
+                zorder=2,
+            )
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         ax.set_xlabel("x")
         ax.set_ylabel("y")
-        ax.set_title(f"{self.title_prefix} rollout coverage at step {step} (n samples: {coords.shape[0]})")
+        if trajectories:
+            horizon = getattr(self, "_last_rollout_horizon", "?")
+            ax.set_title(
+                f"{self.title_prefix} rollout coverage at step {step} "
+                f"({len(trajectories)} trajectories, horizon={horizon})"
+            )
+        else:
+            ax.set_title(
+                f"{self.title_prefix} rollout coverage at step {step} "
+                f"(n samples: {coords.shape[0]})"
+            )
         ax.set_xlim(lower[0], upper[0])
         ax.set_ylim(lower[1], upper[1])
         self._overlay_maze_walls(ax)
@@ -1184,6 +1500,8 @@ class XYCoverageVisualizer(ContinuousCoverageVisualizer):
 
 
 class PointMazeCoverageVisualizer(XYCoverageVisualizer):
+    NUM_TRAJECTORIES = 10
+
     def __init__(
         self,
         agent,
@@ -1191,7 +1509,7 @@ class PointMazeCoverageVisualizer(XYCoverageVisualizer):
         save_dir: str = "pointmaze_plots",
         rollout_steps: int = 10000,
         bins: int = 36,
-        policy_eval_points: int = 128,
+        policy_eval_points: int = 256,
     ):
         super().__init__(
             agent,
@@ -1199,12 +1517,86 @@ class PointMazeCoverageVisualizer(XYCoverageVisualizer):
             save_dir=save_dir,
             rollout_steps=rollout_steps,
             bins=bins,
-            title_prefix="PointMaze XY",
+            title_prefix="PointMaze physical XY",
             policy_eval_points=policy_eval_points,
         )
 
     def _use_env_plot_bounds(self) -> bool:
         return False
+
+    def _environment_horizon(self) -> int:
+        current = self.env
+        visited = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            spec = getattr(current, "spec", None)
+            horizon = getattr(spec, "max_episode_steps", None)
+            if horizon is None:
+                horizon = getattr(current, "_max_episode_steps", None)
+            if horizon is not None:
+                return int(horizon)
+            current = getattr(current, "env", None)
+        raise RuntimeError("PointMaze environment does not expose max_episode_steps")
+
+    def _policy_query_uses_proprio(self) -> bool:
+        return (
+            getattr(self.agent, "obs_type", None) == "pixels"
+            and (
+                getattr(self.agent, "dynamics_kernel_input", None) == "states"
+                or getattr(self.agent, "pmd_warm_start", False)
+            )
+        )
+
+    def _policy_query_meta(self, time_step) -> Optional[dict]:
+        """Attach state needed by state dynamics and PMD warm-start queries."""
+        if not self._policy_query_uses_proprio():
+            return None
+        dimensions = int(getattr(self.agent, "dynamics_state_dim", 4))
+        proprio = np.asarray(
+            getattr(time_step, "proprio_observation", []), dtype=np.float32
+        ).reshape(-1)
+        if proprio.size < dimensions:
+            raise ValueError(
+                "PointMaze policy diagnostics need full state metadata: "
+                f"expected {dimensions} values, got {proprio.size}"
+            )
+        return {"proprio_state": proprio[:dimensions].copy()}
+
+    def _sample_policy_rollout(self, step: int) -> np.ndarray:
+        rng = np.random.default_rng(int(step))
+        horizon = self._environment_horizon()
+        trajectories = []
+
+        for trajectory_idx in range(self.NUM_TRAJECTORIES):
+            time_step = self.env.reset(seed=int(step) + trajectory_idx)
+            trajectory = []
+            for _ in range(horizon):
+                coord = self._extract_coordinates(time_step)
+                if coord is not None:
+                    trajectory.append(coord)
+
+                probs = np.asarray(
+                    self.agent.compute_action_probs(
+                        time_step.observation,
+                        meta=self._policy_query_meta(time_step),
+                    ),
+                    dtype=np.float64,
+                )
+                probs = np.clip(probs, 0.0, None)
+                probs = probs / max(probs.sum(), 1e-12)
+                action = rng.choice(self.agent.n_actions, p=probs)
+                time_step = self.env.step(action)
+                if time_step.last():
+                    break
+
+            if trajectory:
+                trajectories.append(np.asarray(trajectory, dtype=np.float32))
+
+        self._last_trajectories = trajectories
+        self._last_rollout_horizon = horizon
+        if not trajectories:
+            return np.zeros((0, 0), dtype=np.float32)
+        return np.concatenate(trajectories, axis=0)
 
     def _policy_probe_points(self) -> Optional[np.ndarray]:
         n_points = int(self.policy_eval_points)
@@ -1226,7 +1618,15 @@ class PointMazeCoverageVisualizer(XYCoverageVisualizer):
         probabilities = []
         for xy in points:
             obs = self._observation_for_policy_probe_point(xy)
-            probs = np.asarray(self.agent.compute_action_probs(obs), dtype=np.float64).reshape(-1)
+            meta = None
+            if self._policy_query_uses_proprio():
+                dimensions = int(getattr(self.agent, "dynamics_state_dim", 4))
+                coordinates = np.zeros(dimensions, dtype=np.float32)
+                coordinates[:2] = np.asarray(xy, dtype=np.float32).reshape(-1)[:2]
+                meta = {"proprio_state": coordinates}
+            probs = np.asarray(
+                self.agent.compute_action_probs(obs, meta=meta), dtype=np.float64
+            ).reshape(-1)
             probs = np.clip(probs, 0.0, None)
             probs = probs / max(probs.sum(), 1e-12)
             probabilities.append(probs)
@@ -1253,7 +1653,7 @@ class PointMazeCoverageVisualizer(XYCoverageVisualizer):
         self._add_policy_action_legend(axes[1], probabilities.shape[1])
         fig.suptitle(
             f"{self.title_prefix} policy action probabilities at step {step} "
-            f"({points.shape[0]} feasible probe points)",
+            f"({points.shape[0]} feasible XY probes, velocity=(0, 0))",
             fontsize=13,
         )
 
@@ -1269,7 +1669,26 @@ class PointMazeNystromDebugVisualizer:
     def __init__(self, save_dir: str = "pointmaze_plots"):
         self.save_dir = Path(save_dir)
 
-    def save_fixed_points_plot(self, layout: dict, points: np.ndarray, n_actions: int) -> None:
+    @staticmethod
+    def _format_stat_triplet(values: Optional[dict]) -> str:
+        if not isinstance(values, dict):
+            return "n/a"
+        formatted = []
+        for key in ("min", "median", "max"):
+            value = values.get(key)
+            if value is None or not np.isfinite(float(value)):
+                formatted.append("n/a")
+            else:
+                formatted.append(f"{float(value):.4g}")
+        return "/".join(formatted)
+
+    def save_fixed_points_plot(
+            self,
+            layout: dict,
+            points: np.ndarray,
+            n_actions: int,
+            stats: Optional[dict] = None,
+        ) -> None:
         self.save_dir.mkdir(parents=True, exist_ok=True)
         save_path = self.save_dir / "fixed_nystrom_points.png"
         points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
@@ -1284,6 +1703,7 @@ class PointMazeNystromDebugVisualizer:
                     facecolor="black",
                     edgecolor="black",
                     linewidth=0.5,
+                    zorder=1,
                 )
             )
 
@@ -1297,9 +1717,10 @@ class PointMazeNystromDebugVisualizer:
                 fill=False,
                 edgecolor="black",
                 linewidth=1.2,
+                zorder=2,
             )
         )
-        ax.scatter(points[:, 0], points[:, 1], s=7, c="#ff7f0e", linewidths=0.0, alpha=1.0)
+        ax.scatter(points[:, 0], points[:, 1], s=7, c="#ff7f0e", linewidths=0.0, alpha=1.0, zorder=8)
         ax.scatter(
             points[0, 0],
             points[0, 1],
@@ -1308,7 +1729,7 @@ class PointMazeNystromDebugVisualizer:
             c="white",
             edgecolors="black",
             linewidths=0.9,
-            zorder=5,
+            zorder=9,
         )
         ax.set_xlim(lower[0] - 0.1, upper[0] + 0.1)
         ax.set_ylim(lower[1] - 0.1, upper[1] + 0.1)
@@ -1316,6 +1737,35 @@ class PointMazeNystromDebugVisualizer:
         ax.set_xlabel("x")
         ax.set_ylabel("y")
         ax.set_title(f"Fixed Nyström continuous grid ({points.shape[0]} states, all {n_actions} actions each)")
+        if isinstance(stats, dict):
+            grid_spacing = stats.get("grid_spacing")
+            spacing = self._format_stat_triplet(stats.get("point_spacing"))
+            step_size = self._format_stat_triplet(stats.get("step_size"))
+            grid_line = "grid spacing: n/a"
+            if isinstance(grid_spacing, dict):
+                grid_line = (
+                    f"grid dx/dy: {float(grid_spacing.get('x', float('nan'))):.4g}/"
+                    f"{float(grid_spacing.get('y', float('nan'))):.4g} "
+                    f"({int(grid_spacing.get('n_x', 0))}x{int(grid_spacing.get('n_y', 0))})"
+                )
+            info_text = "\n".join(
+                [
+                    f"border margin: {float(stats.get('border_margin', 0.0)):.4g}",
+                    grid_line,
+                    f"point NN distance min/median/max: {spacing}",
+                    f"agent step distance min/median/max: {step_size}",
+                ]
+            )
+            ax.text(
+                0.02,
+                0.98,
+                info_text,
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=8,
+                bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": "#333333", "alpha": 0.86},
+            )
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         print(f"Fixed Nyström continuous grid plot saved to: {save_path}")

@@ -1,0 +1,66 @@
+# @package _global_
+# Paper Sec. 4.3 / Table 1 (state observations): subspace ROVER on PointMaze UMaze.
+# Dynamics: Gaussian kernel on learned features of the full state (x, y, vx, vy).
+# Coverage: Gaussian kernel on the raw position projection g(s) = (x, y)  (App. E, G.8).
+# Start position is one of [-1,1], [1,1], [1,0]; the paper trains seeds 1..3 per start.
+defaults:
+  - /env: pointmaze/pointmaze_umaze_full_state_discrete
+  - _self_
+
+env:
+  continuing_task: true            # pretraining ignores the goal; episodes only truncate (300 steps)
+  pointmaze:
+    start_position: [-1.0, 1.0]
+
+task_name: ${env.name}
+obs_type: states
+frame_stack: 1
+action_repeat: 1
+resolution: 84
+grayscale: true
+discount: 0.99
+seed: 1
+device: cuda
+
+num_train_frames: 250_000
+num_seed_frames: 10_000            # uniformly random actions before the first update
+
+agent:
+  coverage_indices: [0, 1]         # g(s) = (x, y)
+  lambda_reg: 1e-3                 # KRR regularisation lambda
+  lr_actor: 25                     # PMD step size eta (initial value of the line search)
+  pmd_steps: 5
+  sink_schedule: "linear(0.0, 5.0, 50000, 250000)"   # sink scale: 0 until 50k, ramps to 5 at 250k
+  epsilon_schedule: 0.3
+  feature_dim: 256
+  hidden_dim: 1024
+  lr_encoder: 1e-4
+  lr_T: 1e-4
+  batch_size: 1024
+  batch_size_actor: 100000         # latest transitions used for each actor update
+  subsamples: 10000                # Nystrom landmarks m
+  pca_truncation: 1000             # rank of the reduced adjoint solve
+  candidate_multiplier: 5.0
+  cholesky_tolerance: 1e-6
+  dynamics_kernel: gaussian
+  dynamics_bandwidth_mult: 1.0
+  coverage_bandwidth_mult: 1.0
+  update_every_steps: 10
+  update_actor_every_steps: 20000
+  T_init_steps: 5000
+  total_train_steps: ${num_train_frames}
+  device: ${device}
+
+eval:
+  every_frames: 20_000
+  num_trajectories: 50
+  grid_size: 90
+  radius: 0.08
+
+output_dir: results/pointmaze/umaze_states/start${env.pointmaze.start_position}/seed${seed}
+
+hydra:
+  run:
+    dir: ${output_dir}
+  job:
+    chdir: false
